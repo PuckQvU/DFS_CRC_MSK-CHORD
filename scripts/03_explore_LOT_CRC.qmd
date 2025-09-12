@@ -1,0 +1,127 @@
+---
+title: "Explore lines of treatment for colorectal cancer"
+author: "Puck Quarles van Ufford"
+format: html
+---
+
+```{r}
+library("tidyverse")
+```
+
+# Load data
+
+```{r}
+data_clinical_patient <- read_tsv("../data/01_data_clinical_patient.tsv")
+data_timeline_treatment <- read_tsv("../data/01_data_timeline_treatment.tsv")
+data_clinical_sample <- read_tsv("../data/01_data_clinical_sample.tsv")
+data_timeline_surgery <- read_tsv("../data/01_data_timeline_surgery.tsv")
+```
+
+# Prepare data
+
+Identify CRC patients
+
+```{r}
+CRC_patients <- data_clinical_sample |> 
+  filter(CANCER_TYPE == "Colorectal Cancer") |> 
+  pull(PATIENT_ID) |> 
+  unique()
+```
+
+Filter treatment data
+
+```{r}
+data_timeline_treatment_CRC <- data_timeline_treatment |> 
+  filter(PATIENT_ID %in% CRC_patients)
+data_timeline_surgery_CRC <- data_timeline_surgery |> 
+  filter(PATIENT_ID %in% CRC_patients)
+```
+
+# Explore data
+
+```{r}
+data_timeline_treatment_CRC |> 
+  group_by(SUBTYPE) |> 
+  summarise(n = n()) |> 
+  ggplot(mapping = aes(x = "", 
+                       y = n, 
+                       fill = SUBTYPE)) +
+  geom_bar(stat = "identity", 
+           width = 1,
+           color = "white") +
+  coord_polar("y", start = 0) +
+  theme_void()
+```
+
+```{r}
+data_timeline_treatment_CRC |> 
+  group_by(SUBTYPE, AGENT) |> 
+  summarise(n = n(), .groups = "keep") |> 
+  arrange(-n)
+
+treatment_top_5 <- data_timeline_treatment_CRC |> 
+  group_by(SUBTYPE, AGENT) |> 
+  summarise(n = n(), .groups = "keep") |> 
+  arrange(-n) |> 
+  ungroup() |> 
+  slice(1:5) |> 
+  pull(AGENT)
+```
+
+```{r}
+data_timeline_treatment_CRC |> 
+  filter(AGENT %in% treatment_top_5) |> 
+  mutate(length_of_treatment = STOP_DATE - START_DATE) |> 
+  ggplot(mapping = aes(x = AGENT,
+                       y = length_of_treatment)) + 
+  geom_boxplot() + 
+  theme_bw()
+```
+
+```{r}
+data_clinical_patient_treatments_top_5 <- data_clinical_patient |> 
+  inner_join(data_timeline_treatment_CRC, join_by(PATIENT_ID)) |> 
+  filter(AGENT %in% treatment_top_5)
+
+data_clinical_patient_treatments_top_5 |> 
+  ggplot(mapping = aes(x = AGENT,
+                       fill = GENDER)) +
+  geom_bar() + 
+  theme_bw() + 
+  theme(legend.position = "bottom")
+
+data_clinical_patient_treatments_top_5 |> 
+  ggplot(mapping = aes(x = AGENT,
+                       fill = STAGE_HIGHEST_RECORDED)) +
+  geom_bar() + 
+  theme_bw() + 
+  theme(legend.position = "bottom")
+
+data_clinical_patient_treatments_top_5 |> 
+  ggplot(mapping = aes(x = AGENT,
+                       fill = as.character(NUM_ICDO_DX))) +
+  geom_bar() + 
+  theme_bw() + 
+  theme(legend.position = "bottom")
+
+data_clinical_patient_treatments_top_5 |> 
+  ggplot(mapping = aes(x = AGENT,
+                       fill = SMOKING_PREDICTIONS_3_CLASSES)) +
+  geom_bar() + 
+  theme_bw() + 
+  theme(legend.position = "bottom")
+```
+
+```{r}
+data_timeline_surgery_CRC |> 
+  group_by(SUBTYPE) |> 
+  summarise(n = n()) |> 
+  ggplot(mapping = aes(x = "", 
+                       y = n, 
+                       fill = SUBTYPE)) +
+  geom_bar(stat = "identity", 
+           width = 1,
+           color = "white") +
+  coord_polar("y", start = 0) +
+  theme_void()
+```
