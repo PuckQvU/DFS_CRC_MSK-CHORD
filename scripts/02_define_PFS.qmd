@@ -32,202 +32,52 @@ The [NCI Dictionary of Cancer Terms](https://www.cancer.gov/publications/diction
 
 > The length of time during and after the treatment of a disease, such as cancer, that a patient lives with the disease but it does not get worse. In a clinical trial, measuring the progression-free survival is one way to see how well a new treatment works. Also called PFS.
 
-I define PFS based on a chosen timepoint 0 and a relevant PFS end-point.
-In the timeline data, timepoint 0 is defined as the time of sequencing. This can be far after sample acquisition, diagnosis or surgery, so it is not necessarily a good timepoint 0 for the purposes of this project. I define three options for timepoint 0 and will discuss with my supervisors which to use. Relevant timepoint 0's include:
-1. Date of first diagnosis, defined by data_timeline_diagnosis;
-2. Date of first treatment, defined by data_timeline_treatment and data_timeline_surgery;
-3. Date of first surgery, defined by data_timeline_surgery.
-
-Relevant PFS end-points include:
+I define PFS based on a chosen time point 0 and a relevant PFS end-point.
+In the timeline data, time point 0 is defined as the time of sequencing. This can be far after sample acquisition, diagnosis or surgery, so it is not necessarily a good time point 0 for the purposes of this project. I define time point 0 as the date of the first surgery, defined by data_timeline_surgery. Relevant PFS end-points include:
 1. Progression, defined by data_timeline_progression;
 2. Recurrence, defined by data_timeline_cancer_presence;
 3. Death, defined by data_clinical_patient;
 4. Censored or last follow-up, defined by data_clinical patient.
 
-## Create startpoint data
+# Prepare PFS data
 
-For each patient, I first define the diagnosis date, date of first surgery, and date of first treatment. These form the foundations of three potential PFS datasets with different start dates.
+First, identify the CRC patients:
 
 ```{r}
-PFS_from_diagnosis <- data_timeline_diagnosis |> 
-  group_by(PATIENT_ID) |> 
-  arrange(START_DATE) |> 
-  slice(1) |> 
-  select(PATIENT_ID,
-         DATE_DIAGNOSIS = START_DATE)
+CRC_patients <- data_clinical_sample |> 
+  filter(CANCER_TYPE == "Colorectal Cancer") |> 
+  pull(PATIENT_ID) |> 
+  unique()
+```
 
-PFS_from_first_surgery <- data_timeline_surgery |> 
-  filter(SUBTYPE == "PROCEDURE") |> 
+Next, find the date of the first surgery:
+
+```{r}
+first_surgery_dates <- data_timeline_surgery |> 
+  filter(SUBTYPE == "PROCEDURE",
+         PATIENT_ID %in% CRC_patients) |> 
   group_by(PATIENT_ID) |> 
   arrange(START_DATE) |> 
   slice(1) |> 
   select(PATIENT_ID,
          DATE_FIRST_SURGERY = START_DATE)
-
-PFS_from_first_treatment <- data_timeline_treatment |> 
-  group_by(PATIENT_ID) |> 
-  arrange(START_DATE) |> 
-  slice(1) |> 
-  select(PATIENT_ID,
-         DATE_FIRST_NON_SURGICAL_TREATMENT = START_DATE) |> 
-  full_join(PFS_from_first_surgery, join_by(PATIENT_ID)) |> 
-  mutate(DATE_FIRST_TREATMENT = case_when(is.na(DATE_FIRST_NON_SURGICAL_TREATMENT) ~ DATE_FIRST_SURGERY,
-                                          is.na(DATE_FIRST_SURGERY) ~ DATE_FIRST_NON_SURGICAL_TREATMENT,
-                                          .default = min(DATE_FIRST_NON_SURGICAL_TREATMENT, DATE_FIRST_SURGERY))) |> 
-  select(PATIENT_ID,
-         DATE_FIRST_TREATMENT)
 ```
 
-Looking at how far the start date is from the date the samples were sequenced:
-
-```{r}
-p1 <- PFS_from_diagnosis |> 
-  left_join(data_clinical_sample) |> 
-  ggplot(mapping = aes(x = -DATE_DIAGNOSIS,
-                       y = CANCER_TYPE,
-                       color = CANCER_TYPE,
-                       fill = CANCER_TYPE))+
-  geom_boxplot(alpha = 0.5) +
-  theme_bw() + 
-  theme(
-    axis.title.y = element_blank(),
-    legend.position = "None"
-  ) + 
-  labs(
-    x = "Days",
-    title = "Time between date of diagnosis and inclusion into the cohort"
-  )
-
-p2 <- PFS_from_first_surgery |> 
-  left_join(data_clinical_sample) |> 
-  ggplot(mapping = aes(x = -DATE_FIRST_SURGERY,
-                       y = CANCER_TYPE,
-                       color = CANCER_TYPE,
-                       fill = CANCER_TYPE))+
-  geom_boxplot(alpha = 0.5) +
-  theme_bw() + 
-  theme(
-    axis.title.y = element_blank(),
-    legend.position = "None"
-  ) + 
-  labs(
-    x = "Days",
-    title = "Time between date of first surgery and inclusion into the cohort"
-  )
-
-p3 <- PFS_from_first_treatment |> 
-  left_join(data_clinical_sample) |> 
-  ggplot(mapping = aes(x = -DATE_FIRST_TREATMENT,
-                       y = CANCER_TYPE,
-                       color = CANCER_TYPE,
-                       fill = CANCER_TYPE))+
-  geom_boxplot(alpha = 0.5) +
-  theme_bw() + 
-  theme(
-    axis.title.y = element_blank(),
-    legend.position = "None"
-  ) + 
-  labs(
-    x = "Days",
-    title = "Time between date of first treatment and inclusion into the cohort"
-  )
-
-p1 / p2 / p3 + 
-  plot_layout(
-    axis_titles = "collect"
-  )
-
-ggsave(filename = "../results/02_start_time_vs_inclusion.png", width = 3200, height = 3200, units = "px")
-```
-
-
-## Create PFS data
-
-Now I will create a datasets for the PFS relevant events, based on using diagnosis as timepoint 0.
+Then define the PFS time based on the different end points:
 
 ```{r}
 # Progression
-PFS_from_diagnosis <- PFS_from_diagnosis |> 
-  left_join(data_timeline_progression, join_by(PATIENT_ID)) |> 
-  filter(START_DATE > DATE_DIAGNOSIS,
-         PROGRESSION == "Y") |> 
-  group_by(PATIENT_ID) |> 
-  summarise(DATE_FIRST_PROGRESSION = min(START_DATE)) |> 
-  right_join(PFS_from_diagnosis, join_by(PATIENT_ID)) |> 
-  mutate(PROGRESSION = !is.na(DATE_FIRST_PROGRESSION))
-
-# Recurrence
-PFS_from_diagnosis <- PFS_from_diagnosis |> 
-  left_join(data_timeline_cancer_presence, join_by(PATIENT_ID)) |> 
-  filter(START_DATE > DATE_DIAGNOSIS) |> 
-  group_by(PATIENT_ID) |> 
-  arrange(START_DATE) |> 
-  slice(1) |> 
-  filter(HAS_CANCER == "N") |> 
-  select(PATIENT_ID, DATE_DIAGNOSIS, PROGRESSION, DATE_FIRST_PROGRESSION) |> 
-  left_join(data_timeline_cancer_presence, join_by(PATIENT_ID)) |> 
-  filter(START_DATE > DATE_DIAGNOSIS,
-         HAS_CANCER == "Y") |> 
-  group_by(PATIENT_ID) |> 
-  summarise(DATE_FIRST_RECURRENCE = min(START_DATE)) |> 
-  right_join(PFS_from_diagnosis, join_by(PATIENT_ID)) |> 
-  mutate(RECURRENCE = !is.na(DATE_FIRST_RECURRENCE)) 
-
-# Death
-PFS_from_diagnosis <- PFS_from_diagnosis |> 
-  left_join(data_clinical_patient, join_by(PATIENT_ID)) |> 
-  filter(OS_STATUS == "1:DECEASED") |> 
-  group_by(PATIENT_ID) |> 
-  slice(1) |> 
-  select(PATIENT_ID, OS_MONTHS) |> 
-  right_join(PFS_from_diagnosis, join_by(PATIENT_ID)) |> 
-  mutate(DEATH = !is.na(OS_MONTHS),
-         DATE_DEATH = round(OS_MONTHS*30.44)) |> 
-  select(-OS_MONTHS)
-
-# Censor
-PFS_from_diagnosis <- PFS_from_diagnosis |> 
-  left_join(data_clinical_patient, join_by(PATIENT_ID)) |> 
-  group_by(PATIENT_ID) |> 
-  mutate(PFS_STATUS = ifelse(PROGRESSION == FALSE & RECURRENCE == FALSE & DEATH == FALSE, "0:No progression", "1:Progression event"),
-         PFS_DATE = ifelse(PFS_STATUS == "1:Progression event", pmin(DATE_FIRST_PROGRESSION, DATE_FIRST_RECURRENCE, DATE_DEATH, na.rm = TRUE), round(OS_MONTHS*30.44)),
-         DAYS_TO_EVENT = PFS_DATE - DATE_DIAGNOSIS,
-         YEARS_TO_EVENT = DAYS_TO_EVENT/365.25) |> 
-  select(PATIENT_ID, PFS_STATUS, DAYS_TO_EVENT, YEARS_TO_EVENT, PFS_DATE, DATE_DIAGNOSIS, PROGRESSION, DATE_FIRST_PROGRESSION, RECURRENCE, DATE_FIRST_RECURRENCE, DEATH, DATE_DEATH)
-
-write_tsv(x = PFS_from_diagnosis,
-          file = "../data/02_PFS_from_diagnosis.tsv")
-
-PFS_from_diagnosis |> 
-  group_by(PFS_STATUS) |> 
-  summarise(n = n(), pct = n()/nrow(PFS_from_diagnosis))
-
-PFS_from_diagnosis |> 
-  ggplot(mapping = aes(x = YEARS_TO_EVENT,
-                       fill = PFS_STATUS)) + 
-  geom_histogram(color = "white") + 
-  facet_wrap(~ PFS_STATUS, dir = "v") + 
-  theme_minimal() + 
-  theme(legend.position = "None")
-
-ggsave(filename = "../results/02_years_to_progression_from_diagnosis.png")
-```
-
-Based on first surgery as timepoint 0.
-
-```{r}
-# Progression
-  PFS_from_first_surgery <- PFS_from_first_surgery |> 
+data_PFS <- first_surgery_dates |> 
   left_join(data_timeline_progression, join_by(PATIENT_ID)) |> 
   filter(START_DATE > DATE_FIRST_SURGERY,
          PROGRESSION == "Y") |> 
   group_by(PATIENT_ID) |> 
   summarise(DATE_FIRST_PROGRESSION = min(START_DATE)) |> 
-  right_join(PFS_from_first_surgery, join_by(PATIENT_ID)) |> 
-  mutate(PROGRESSION = !is.na(DATE_FIRST_PROGRESSION))
+  right_join(first_surgery_dates, join_by(PATIENT_ID)) |> 
+  mutate(PROGRESSION = !is.na(DATE_FIRST_PROGRESSION)) 
 
 # Recurrence
-PFS_from_first_surgery <- PFS_from_first_surgery |> 
+data_PFS <- data_PFS |> 
   left_join(data_timeline_cancer_presence, join_by(PATIENT_ID)) |> 
   filter(START_DATE > DATE_FIRST_SURGERY) |> 
   group_by(PATIENT_ID) |> 
@@ -240,23 +90,23 @@ PFS_from_first_surgery <- PFS_from_first_surgery |>
          HAS_CANCER == "Y") |> 
   group_by(PATIENT_ID) |> 
   summarise(DATE_FIRST_RECURRENCE = min(START_DATE)) |> 
-  right_join(PFS_from_first_surgery, join_by(PATIENT_ID)) |> 
+  right_join(data_PFS, join_by(PATIENT_ID)) |> 
   mutate(RECURRENCE = !is.na(DATE_FIRST_RECURRENCE)) 
 
 # Death
-PFS_from_first_surgery <- PFS_from_first_surgery |> 
+data_PFS <- data_PFS |> 
   left_join(data_clinical_patient, join_by(PATIENT_ID)) |> 
   filter(OS_STATUS == "1:DECEASED") |> 
   group_by(PATIENT_ID) |> 
   slice(1) |> 
   select(PATIENT_ID, OS_MONTHS) |> 
-  right_join(PFS_from_first_surgery, join_by(PATIENT_ID)) |> 
+  right_join(data_PFS, join_by(PATIENT_ID)) |> 
   mutate(DEATH = !is.na(OS_MONTHS),
          DATE_DEATH = round(OS_MONTHS*30.44)) |> 
   select(-OS_MONTHS)
 
 # Censor
-PFS_from_first_surgery <- PFS_from_first_surgery |> 
+data_PFS <- data_PFS |> 
   left_join(data_clinical_patient, join_by(PATIENT_ID)) |> 
   group_by(PATIENT_ID) |> 
   mutate(PFS_STATUS = ifelse(PROGRESSION == FALSE & RECURRENCE == FALSE & DEATH == FALSE, "0:No progression", "1:Progression event"),
@@ -265,14 +115,14 @@ PFS_from_first_surgery <- PFS_from_first_surgery |>
          YEARS_TO_EVENT = DAYS_TO_EVENT/365.25) |> 
   select(PATIENT_ID, PFS_STATUS, DAYS_TO_EVENT, YEARS_TO_EVENT, PFS_DATE, DATE_FIRST_SURGERY, PROGRESSION, DATE_FIRST_PROGRESSION, RECURRENCE, DATE_FIRST_RECURRENCE, DEATH, DATE_DEATH)
 
-write_tsv(x = PFS_from_first_surgery,
-          file = "../data/02_PFS_from_first_surgery.tsv")
+write_tsv(x = data_PFS,
+          file = "../data/02_data_PFS.tsv")
 
-PFS_from_first_surgery |> 
+data_PFS |> 
   group_by(PFS_STATUS) |> 
-  summarise(n = n(), pct = n()/nrow(PFS_from_first_surgery))
+  summarise(n = n(), pct = n()/nrow(data_PFS))
 
-PFS_from_first_surgery |> 
+data_PFS |> 
   ggplot(mapping = aes(x = YEARS_TO_EVENT,
                        fill = PFS_STATUS)) + 
   geom_histogram(color = "white") + 
@@ -280,302 +130,54 @@ PFS_from_first_surgery |>
   theme_minimal() + 
   theme(legend.position = "None")
 
-ggsave(filename = "../results/02_years_to_progression_from_first_surgery.png")
-```
-
-Based on first treatment as timepoint 0.
-
-```{r}
-# Progression
-  PFS_from_first_treatment <- PFS_from_first_treatment |> 
-  left_join(data_timeline_progression, join_by(PATIENT_ID)) |> 
-  filter(START_DATE > DATE_FIRST_TREATMENT,
-         PROGRESSION == "Y") |> 
-  group_by(PATIENT_ID) |> 
-  summarise(DATE_FIRST_PROGRESSION = min(START_DATE)) |> 
-  right_join(PFS_from_first_treatment, join_by(PATIENT_ID)) |> 
-  mutate(PROGRESSION = !is.na(DATE_FIRST_PROGRESSION))
-
-# Recurrence
-PFS_from_first_treatment <- PFS_from_first_treatment |> 
-  left_join(data_timeline_cancer_presence, join_by(PATIENT_ID)) |> 
-  filter(START_DATE > DATE_FIRST_TREATMENT) |> 
-  group_by(PATIENT_ID) |> 
-  arrange(START_DATE) |> 
-  slice(1) |> 
-  filter(HAS_CANCER == "N") |> 
-  select(PATIENT_ID, DATE_FIRST_TREATMENT, PROGRESSION, DATE_FIRST_PROGRESSION) |> 
-  left_join(data_timeline_cancer_presence, join_by(PATIENT_ID)) |> 
-  filter(START_DATE > DATE_FIRST_TREATMENT,
-         HAS_CANCER == "Y") |> 
-  group_by(PATIENT_ID) |> 
-  summarise(DATE_FIRST_RECURRENCE = min(START_DATE)) |> 
-  right_join(PFS_from_first_treatment, join_by(PATIENT_ID)) |> 
-  mutate(RECURRENCE = !is.na(DATE_FIRST_RECURRENCE)) 
-
-# Death
-PFS_from_first_treatment <- PFS_from_first_treatment |> 
-  left_join(data_clinical_patient, join_by(PATIENT_ID)) |> 
-  filter(OS_STATUS == "1:DECEASED") |> 
-  group_by(PATIENT_ID) |> 
-  slice(1) |> 
-  select(PATIENT_ID, OS_MONTHS) |> 
-  right_join(PFS_from_first_treatment, join_by(PATIENT_ID)) |> 
-  mutate(DEATH = !is.na(OS_MONTHS),
-         DATE_DEATH = round(OS_MONTHS*30.44)) |> 
-  select(-OS_MONTHS)
-
-# Censor
-PFS_from_first_treatment <- PFS_from_first_treatment |> 
-  left_join(data_clinical_patient, join_by(PATIENT_ID)) |> 
-  group_by(PATIENT_ID) |> 
-  mutate(PFS_STATUS = ifelse(PROGRESSION == FALSE & RECURRENCE == FALSE & DEATH == FALSE, "0:No progression", "1:Progression event"),
-         PFS_DATE = ifelse(PFS_STATUS == "1:Progression event", pmin(DATE_FIRST_PROGRESSION, DATE_FIRST_RECURRENCE, DATE_DEATH, na.rm = TRUE), round(OS_MONTHS*30.44)),
-         DAYS_TO_EVENT = PFS_DATE - DATE_FIRST_TREATMENT,
-         YEARS_TO_EVENT = DAYS_TO_EVENT/365.25) |> 
-  select(PATIENT_ID, PFS_STATUS, DAYS_TO_EVENT, YEARS_TO_EVENT, PFS_DATE, DATE_FIRST_TREATMENT, PROGRESSION, DATE_FIRST_PROGRESSION, RECURRENCE, DATE_FIRST_RECURRENCE, DEATH, DATE_DEATH)
-
-write_tsv(x = PFS_from_first_treatment,
-          file = "../data/02_PFS_from_first_treatment.tsv")
-
-PFS_from_first_treatment |> 
-  group_by(PFS_STATUS) |> 
-  summarise(n = n(), pct = n()/nrow(PFS_from_first_treatment))
-
-PFS_from_first_treatment |> 
-  ggplot(mapping = aes(x = YEARS_TO_EVENT,
-                       fill = PFS_STATUS)) + 
-  geom_histogram(color = "white") + 
-  facet_wrap(~ PFS_STATUS, dir = "v") + 
-  theme_minimal() + 
-  theme(legend.position = "None")
-
-ggsave(filename = "../results/02_years_to_progression_from_first_treatment.png")
+ggsave(filename = "../results/02_years_to_progression_event.png")
 ```
 
 # Kaplan Meier plots
 
 ```{r}
-PFS_from_diagnosis_bin <- PFS_from_diagnosis |> 
+data_PFS_bin <- data_PFS |> 
   mutate(PFS_STATUS = ifelse(PFS_STATUS == "0:No progression", 0, 1))
 
-fit_PFS_from_diagnosis <- survfit(Surv(YEARS_TO_EVENT, PFS_STATUS) ~ 1, data = PFS_from_diagnosis_bin)
+fit_PFS <- survfit(Surv(YEARS_TO_EVENT, PFS_STATUS) ~ 1, data = data_PFS_bin)
 
 ggsurvplot(
-  fit = fit_PFS_from_diagnosis,
-  data = PFS_from_diagnosis_bin,
+  fit = fit_PFS,
+  data = data_PFS_bin,
+  title = "KM plot for PFS after first CRC surgery",
   xlab = "Time (years)",
   ylab = "PFS probability",
   xlim = c(0, 10), 
   ylim = c(0, 1),
-  legend = "none"
-) + 
-  labs(
-    title = "Kaplan-Meier plot for Progression Free Survival from Diagnosis"
-  )
-
-ggsave(filename = "../results/02_KM_from_diagnosis.png")
-```
-
-```{r}
-PFS_from_first_surgery_bin <- PFS_from_first_surgery |> 
-  mutate(PFS_STATUS = ifelse(PFS_STATUS == "0:No progression", 0, 1))
-
-fit_PFS_from_first_surgery <- survfit(Surv(YEARS_TO_EVENT, PFS_STATUS) ~ 1, data = PFS_from_first_surgery_bin)
-
-ggsurvplot(
-  fit = fit_PFS_from_first_surgery,
-  data = PFS_from_first_surgery_bin,
-  xlab = "Time (years)",
-  ylab = "PFS probability",
-  xlim = c(0, 10), 
-  ylim = c(0, 1),
-  legend = "none"
-) + 
-  labs(
-    title = "Kaplan-Meier plot for Progression Free Survival from First Surgery"
-  )
-
-ggsave(filename = "../results/02_KM_from_first_surgery.png")
-```
-
-```{r}
-PFS_from_first_treatment_bin <- PFS_from_first_treatment |> 
-  mutate(PFS_STATUS = ifelse(PFS_STATUS == "0:No progression", 0, 1))
-
-fit_PFS_from_first_treatment <- survfit(Surv(YEARS_TO_EVENT, PFS_STATUS) ~ 1, data = PFS_from_first_treatment_bin)
-
-ggsurvplot(
-  fit = fit_PFS_from_first_treatment,
-  data = PFS_from_first_treatment_bin,
-  xlab = "Time (years)",
-  ylab = "PFS probability",
-  xlim = c(0, 10), 
-  ylim = c(0, 1),
-  legend = "none"
-) + 
-  labs(
-    title = "Kaplan-Meier plot for Progression Free Survival from First Treatment"
-  )
-
-ggsave(filename = "../results/02_KM_from_first_treatment.png")
-```
-
-## Per cancer type (from diagnosis)
-
-```{r}
-PFS_from_diagnosis_CRC <- PFS_from_diagnosis |> 
-  left_join(data_clinical_sample, join_by(PATIENT_ID)) |> 
-  filter(CANCER_TYPE == "Colorectal Cancer") |> 
-  mutate(PFS_STATUS = ifelse(PFS_STATUS == "0:No progression", 0, 1))
-PFS_from_diagnosis_BC <- PFS_from_diagnosis |> 
-  left_join(data_clinical_sample, join_by(PATIENT_ID)) |> 
-  filter(CANCER_TYPE == "Breast Cancer") |> 
-  mutate(PFS_STATUS = ifelse(PFS_STATUS == "0:No progression", 0, 1))
-PFS_from_diagnosis_NSCLC <- PFS_from_diagnosis |> 
-  left_join(data_clinical_sample, join_by(PATIENT_ID)) |> 
-  filter(CANCER_TYPE == "Non-Small Cell Lung Cancer") |> 
-  mutate(PFS_STATUS = ifelse(PFS_STATUS == "0:No progression", 0, 1))
-PFS_from_diagnosis_PaC <- PFS_from_diagnosis |> 
-  left_join(data_clinical_sample, join_by(PATIENT_ID)) |> 
-  filter(CANCER_TYPE == "Pancreatic Cancer") |> 
-  mutate(PFS_STATUS = ifelse(PFS_STATUS == "0:No progression", 0, 1))
-PFS_from_diagnosis_PrC <- PFS_from_diagnosis |> 
-  left_join(data_clinical_sample, join_by(PATIENT_ID)) |> 
-  filter(CANCER_TYPE == "Prostate Cancer") |> 
-  mutate(PFS_STATUS = ifelse(PFS_STATUS == "0:No progression", 0, 1))
-
-
-fit_PFS_from_diagnosis_CRC <- survfit(Surv(YEARS_TO_EVENT, PFS_STATUS) ~ 1, data = PFS_from_diagnosis_CRC)
-fit_PFS_from_diagnosis_BC <- survfit(Surv(YEARS_TO_EVENT, PFS_STATUS) ~ 1, data = PFS_from_diagnosis_BC)
-fit_PFS_from_diagnosis_NSCLC <- survfit(Surv(YEARS_TO_EVENT, PFS_STATUS) ~ 1, data = PFS_from_diagnosis_NSCLC)
-fit_PFS_from_diagnosis_PaC <- survfit(Surv(YEARS_TO_EVENT, PFS_STATUS) ~ 1, data = PFS_from_diagnosis_PaC)
-fit_PFS_from_diagnosis_PrC <- survfit(Surv(YEARS_TO_EVENT, PFS_STATUS) ~ 1, data = PFS_from_diagnosis_PrC)
-
-p1 <- ggsurvplot(
-  fit = fit_PFS_from_diagnosis_CRC,
-  data = PFS_from_diagnosis_CRC,
-  xlab = "Time (years)",
-  ylab = "PFS probability",
-  xlim = c(0, 10), 
-  ylim = c(0, 1),
-  legend = "none"
-) + 
-  labs(
-    title = "Colorectal Cancer",
-    subtitle = str_c("n = ", length(unique(PFS_from_diagnosis_CRC$PATIENT_ID)))
-  )
-
-p2 <- ggsurvplot(
-  fit = fit_PFS_from_diagnosis_BC,
-  data = PFS_from_diagnosis_BC,
-  xlab = "Time (years)",
-  ylab = "PFS probability",
-  xlim = c(0, 10), 
-  ylim = c(0, 1),
-  legend = "none"
-) + 
-  labs(
-    title = "Breast Cancer",
-    subtitle = str_c("n = ", length(unique(PFS_from_diagnosis_BC$PATIENT_ID)))
-  )
-
-p3 <- ggsurvplot(
-  fit = fit_PFS_from_diagnosis_NSCLC,
-  data = PFS_from_diagnosis_NSCLC,
-  xlab = "Time (years)",
-  ylab = "PFS probability",
-  xlim = c(0, 10), 
-  ylim = c(0, 1),
-  legend = "none"
-) + 
-  labs(
-    title = "Non-Small Cell Lung Cancer",
-    subtitle = str_c("n = ", length(unique(PFS_from_diagnosis_NSCLC$PATIENT_ID)))
-  )
-
-p4 <- ggsurvplot(
-  fit = fit_PFS_from_diagnosis_PaC,
-  data = PFS_from_diagnosis_PaC,
-  xlab = "Time (years)",
-  ylab = "PFS probability",
-  xlim = c(0, 10), 
-  ylim = c(0, 1),
-  legend = "none"
-) + 
-  labs(
-    title = "Pancreatic Cancer",
-    subtitle = str_c("n = ", length(unique(PFS_from_diagnosis_PaC$PATIENT_ID)))
-  )
-
-p5 <- ggsurvplot(
-  fit = fit_PFS_from_diagnosis_PrC,
-  data = PFS_from_diagnosis_PrC,
-  xlab = "Time (years)",
-  ylab = "PFS probability",
-  xlim = c(0, 10), 
-  ylim = c(0, 1),
-  legend = "none"
-) + 
-  labs(
-    title = "Prostate Cancer",
-    subtitle = str_c("n = ", length(unique(PFS_from_diagnosis_PrC$PATIENT_ID)))
-  )
-
-(p1$plot + p2$plot + p3$plot) / (p4$plot + p5$plot + plot_spacer()) + 
-  plot_annotation(
-  title = "Kaplan-Meier plots for Progression Free Survival from Diagnosis"
-  ) +
-  plot_layout(
-    axis_titles = "collect"
-  )
-
-ggsave(filename = "../results/02_KM_from_diagnosis_per_type.png", width = 3200, height = 2000, units = "px")
-```
-
-## CRC PFS from surgery
-
-```{r}
-PFS_from_surgery_CRC <- PFS_from_first_surgery |> 
-  left_join(data_clinical_sample, join_by(PATIENT_ID)) |> 
-  filter(CANCER_TYPE == "Colorectal Cancer") |> 
-  mutate(PFS_STATUS = ifelse(PFS_STATUS == "0:No progression", 0, 1))
-
-fit_PFS_from_surgery_CRC <- survfit(Surv(YEARS_TO_EVENT, PFS_STATUS) ~ 1, data = PFS_from_surgery_CRC)
-
-ggsurvplot(
-  fit = fit_PFS_from_surgery_CRC,
-  data = PFS_from_surgery_CRC,
-  xlab = "Time (years)",
-  ylab = "PFS probability",
-  xlim = c(0, 10), 
-  ylim = c(0, 1),
-  risk.table = T,
   break.time.by = 2,
   legend = "none",
-  title = "Progression-free survival after CRC surgery"
+  risk.table = T
 ) 
 
-ggsave(filename = "../results/02_KM_CRC_PFS_from_surgery.png", width = 3200, height = 2000, units = "px")
+ggsave(filename = "../results/02_KM.png")
+```
 
-PFS_from_surgery_CRC <- PFS_from_surgery_CRC |> 
+## By stage
+
+```{r}
+data_PFS_bin <- data_PFS_bin |> 
   inner_join(data_clinical_patient, by = join_by(PATIENT_ID))
 
-fit_by_stage <- survfit(Surv(YEARS_TO_EVENT, PFS_STATUS) ~ STAGE_HIGHEST_RECORDED, data = PFS_from_surgery_CRC)
+fit_PFS_by_stage <- survfit(Surv(YEARS_TO_EVENT, PFS_STATUS) ~ STAGE_HIGHEST_RECORDED, data = data_PFS_bin)
 
 ggsurvplot(
-  fit = fit_by_stage,
-  data = PFS_from_surgery_CRC,
+  fit = fit_PFS_by_stage,
+  data = data_PFS_bin,
+  title = "Progression-free survival after CRC surgery",         
   xlab = "Time (years)",
   ylab = "PFS probability",
   xlim = c(0, 10), 
   ylim = c(0, 1),
-  legend = "bottom",
-  title = "Progression-free survival after CRC surgery",         
+  break.time.by = 1,
+  legend = "top",
   surv.median.line = "hv",
   pval = T,
-  break.time.by = 1
 ) 
 
-ggsave(filename = "../results/02_KM_CRC_PFS_by_stage.png", width = 3200, height = 2000, units = "px")
+ggsave(filename = "../results/02_KM_by_stage.png")
 ```
