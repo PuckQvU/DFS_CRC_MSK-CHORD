@@ -1,0 +1,184 @@
+---
+title: "Prepare surival data"
+author: "Puck Quarles van Ufford"
+format: html
+---
+
+```{r}
+#| label: packages
+#| message: false
+
+library("tidyverse")
+library("survival")
+library("survminer")
+```
+
+```{r}
+#| label: fix_mistake_survminer_package
+#| echo: false
+
+is_ggplot <- function(x)is.ggplot(x)
+```
+
+# Load data
+
+```{r}
+#| label: load_data
+#| message: false
+
+data_clinical_patient <- read_tsv("../data/01_data_clinical_patient.tsv")
+data_clinical_sample <- read_tsv("../data/01_data_clinical_sample.tsv")
+data_timeline_surgery <- read_tsv("../data/01_data_timeline_surgery.tsv")
+data_timeline_progression <- read_tsv("../data/01_data_timeline_progression.tsv")
+data_timeline_cancer_presence <- read_tsv("../data/01_data_timeline_cancer_presence.tsv")
+```
+
+# Select patients
+
+```{r}
+#| label: select_patients
+
+CRC_patients <- data_clinical_patient |> 
+  inner_join(data_clinical_sample, 
+             by = join_by(PATIENT_ID)) |> 
+  filter(CANCER_TYPE == "Colorectal Cancer",
+         STAGE_HIGHEST_RECORDED == "Stage 1-3") |> 
+  pull(PATIENT_ID) |> 
+  unique()
+```
+
+# Prepare survival data
+
+First, find the date of the first surgery:
+
+```{r}
+#| label: first_surgery_date
+
+first_surgery_dates <- data_timeline_surgery |> 
+  filter(SUBTYPE == "PROCEDURE",
+         PATIENT_ID %in% CRC_patients) |> 
+  group_by(PATIENT_ID) |> 
+  arrange(START_DATE) |> 
+  slice(1) |> 
+  select(PATIENT_ID,
+         DATE_FIRST_SURGERY = START_DATE)
+```
+
+Then define the survival times based on the different end points:
+
+```{r}
+#| label: survival_data
+
+# Progression
+data_survival <- first_surgery_dates |> 
+  left_join(data_timeline_progression, join_by(PATIENT_ID)) |> 
+  filter(START_DATE > DATE_FIRST_SURGERY,
+         PROGRESSION == "Y") |> 
+  group_by(PATIENT_ID) |> 
+  summarise(DATE_FIRST_PROGRESSION = min(START_DATE)) |> 
+  right_join(first_surgery_dates, join_by(PATIENT_ID)) |> 
+  mutate(PROGRESSION = !is.na(DATE_FIRST_PROGRESSION)) 
+
+# Recurrence
+data_survival <- data_survival |> 
+  left_join(data_timeline_cancer_presence, join_by(PATIENT_ID)) |> 
+  filter(START_DATE > DATE_FIRST_SURGERY) |> 
+  group_by(PATIENT_ID) |> 
+  arrange(START_DATE) |> 
+  slice(1) |> 
+  filter(HAS_CANCER == "N") |> 
+  select(PATIENT_ID, DATE_FIRST_SURGERY, PROGRESSION, DATE_FIRST_PROGRESSION) |> 
+  left_join(data_timeline_cancer_presence, join_by(PATIENT_ID)) |> 
+  filter(START_DATE > DATE_FIRST_SURGERY,
+         HAS_CANCER == "Y") |> 
+  group_by(PATIENT_ID) |> 
+  summarise(DATE_FIRST_RECURRENCE = min(START_DATE)) |> 
+  right_join(data_survival, join_by(PATIENT_ID)) |> 
+  mutate(RECURRENCE = !is.na(DATE_FIRST_RECURRENCE)) 
+
+# Death
+data_survival <- data_survival |> 
+  left_join(data_clinical_patient, join_by(PATIENT_ID)) |> 
+  filter(OS_STATUS == "1:DECEASED") |> 
+  group_by(PATIENT_ID) |> 
+  slice(1) |> 
+  select(PATIENT_ID, OS_MONTHS) |> 
+  right_join(data_survival, join_by(PATIENT_ID)) |> 
+  mutate(DEATH = !is.na(OS_MONTHS),
+         DATE_DEATH = round(OS_MONTHS*30.44)) |> 
+  select(-OS_MONTHS)
+
+# Censor
+data_survival <- data_survival |> 
+  left_join(data_clinical_patient, join_by(PATIENT_ID)) |> 
+  group_by(PATIENT_ID) |> 
+  mutate(OS_STATUS = ifelse(DEATH == FALSE, 0, 1),
+         PFS_STATUS = ifelse(PROGRESSION == FALSE & RECURRENCE == FALSE & DEATH == FALSE, 0, 1),
+         OS_DATE = round(OS_MONTHS*30.44),
+         PFS_DATE = ifelse(PFS_STATUS == 1, pmin(DATE_FIRST_PROGRESSION, DATE_FIRST_RECURRENCE, DATE_DEATH, na.rm = TRUE), round(OS_MONTHS*30.44)),
+         DAYS_TO_OS_EVENT = OS_DATE - DATE_FIRST_SURGERY,
+         DAYS_TO_PFS_EVENT = PFS_DATE - DATE_FIRST_SURGERY,
+         YEARS_TO_OS_EVENT = DAYS_TO_OS_EVENT/365.25, 
+         YEARS_TO_PFS_EVENT = DAYS_TO_PFS_EVENT/365.25) |> 
+  select(PATIENT_ID, OS_STATUS, DAYS_TO_OS_EVENT, YEARS_TO_OS_EVENT, PFS_STATUS, DAYS_TO_PFS_EVENT, YEARS_TO_PFS_EVENT, DATE_FIRST_SURGERY)
+
+head(data_survival)
+
+write_tsv(x = data_survival,
+          file = "../data/02_data_survival.tsv")
+```
+
+# Summarize survival data
+
+```{r}
+#| label: summarize_survival data
+
+data_survival |> 
+  group_by(OS_STATUS) |> 
+  summarise(n(), mean(YEARS_TO_OS_EVENT))
+
+data_survival |> 
+  group_by(PFS_STATUS) |> 
+  summarise(n(), mean(YEARS_TO_PFS_EVENT))
+```
+
+```{r}
+#| label: km_curves
+#| message: false
+
+fit_OS <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ 1, data = data_survival)
+
+ggsurvplot(
+  fit = fit_OS,
+  data = data_survival,
+  title = "KM plot for OS after first CRC surgery",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "none",
+  risk.table = T,
+  surv.median.line = "hv"
+) 
+
+ggsave("../results/02_KM_OS.png")
+
+fit_PFS <- survfit(Surv(YEARS_TO_PFS_EVENT, PFS_STATUS) ~ 1, data = data_survival)
+
+ggsurvplot(
+  fit = fit_PFS,
+  data = data_survival,
+  title = "KM plot for PFS after first CRC surgery",
+  xlab = "Time (years)",
+  ylab = "PFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "none",
+  risk.table = T,
+  surv.median.line = "hv"
+) 
+
+ggsave("../results/02_KM_PFS.png")
+```
