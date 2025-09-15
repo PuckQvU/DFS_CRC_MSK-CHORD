@@ -2,3 +2,5 @@ external_stay.Rproj
 .Rproj.user/
 data/
 results/
+_quarto.yml
+/.quarto/
