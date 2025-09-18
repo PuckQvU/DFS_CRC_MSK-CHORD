@@ -5,12 +5,19 @@ format: html
 ---
 
 ```{r}
+#| label: seed
+
+set.seed(8)
+```
+
+```{r}
 #| label: packages
 #| message: false
 
 library("tidyverse")
 library("survival")
 library("survminer")
+library("rsample")
 ```
 
 ```{r}
@@ -71,39 +78,50 @@ Then define the survival times based on the different end points:
 
 # Progression
 data_survival <- first_surgery_dates |> 
-  left_join(data_timeline_progression, join_by(PATIENT_ID)) |> 
+  left_join(data_timeline_progression, 
+            join_by(PATIENT_ID)) |> 
   filter(START_DATE > DATE_FIRST_SURGERY,
          PROGRESSION == "Y") |> 
   group_by(PATIENT_ID) |> 
   summarise(DATE_FIRST_PROGRESSION = min(START_DATE)) |> 
-  right_join(first_surgery_dates, join_by(PATIENT_ID)) |> 
+  right_join(first_surgery_dates, 
+             join_by(PATIENT_ID)) |> 
   mutate(PROGRESSION = !is.na(DATE_FIRST_PROGRESSION)) 
 
 # Recurrence
 data_survival <- data_survival |> 
-  left_join(data_timeline_cancer_presence, join_by(PATIENT_ID)) |> 
+  left_join(data_timeline_cancer_presence, 
+            join_by(PATIENT_ID)) |> 
   filter(START_DATE > DATE_FIRST_SURGERY) |> 
   group_by(PATIENT_ID) |> 
   arrange(START_DATE) |> 
   slice(1) |> 
   filter(HAS_CANCER == "N") |> 
-  select(PATIENT_ID, DATE_FIRST_SURGERY, PROGRESSION, DATE_FIRST_PROGRESSION) |> 
-  left_join(data_timeline_cancer_presence, join_by(PATIENT_ID)) |> 
+  select(PATIENT_ID, 
+         DATE_FIRST_SURGERY, 
+         PROGRESSION, 
+         DATE_FIRST_PROGRESSION) |> 
+  left_join(data_timeline_cancer_presence, 
+            join_by(PATIENT_ID)) |> 
   filter(START_DATE > DATE_FIRST_SURGERY,
          HAS_CANCER == "Y") |> 
   group_by(PATIENT_ID) |> 
   summarise(DATE_FIRST_RECURRENCE = min(START_DATE)) |> 
-  right_join(data_survival, join_by(PATIENT_ID)) |> 
+  right_join(data_survival, 
+             join_by(PATIENT_ID)) |> 
   mutate(RECURRENCE = !is.na(DATE_FIRST_RECURRENCE)) 
 
 # Death
 data_survival <- data_survival |> 
-  left_join(data_clinical_patient, join_by(PATIENT_ID)) |> 
+  left_join(data_clinical_patient, 
+            join_by(PATIENT_ID)) |> 
   filter(OS_STATUS == "1:DECEASED") |> 
   group_by(PATIENT_ID) |> 
   slice(1) |> 
-  select(PATIENT_ID, OS_MONTHS) |> 
-  right_join(data_survival, join_by(PATIENT_ID)) |> 
+  select(PATIENT_ID, 
+         OS_MONTHS) |> 
+  right_join(data_survival, 
+             join_by(PATIENT_ID)) |> 
   mutate(DEATH = !is.na(OS_MONTHS),
          DATE_DEATH = round(OS_MONTHS*30.44)) |> 
   select(-OS_MONTHS)
@@ -112,15 +130,33 @@ data_survival <- data_survival |>
 data_survival <- data_survival |> 
   left_join(data_clinical_patient, join_by(PATIENT_ID)) |> 
   group_by(PATIENT_ID) |> 
-  mutate(OS_STATUS = ifelse(DEATH == FALSE, 0, 1),
-         PFS_STATUS = ifelse(PROGRESSION == FALSE & RECURRENCE == FALSE & DEATH == FALSE, 0, 1),
+  mutate(OS_STATUS = ifelse(DEATH == FALSE, 
+                            0, 
+                            1),
+         PFS_STATUS = ifelse(PROGRESSION == FALSE & 
+                               RECURRENCE == FALSE & 
+                               DEATH == FALSE, 
+                             0, 
+                             1),
          OS_DATE = round(OS_MONTHS*30.44),
-         PFS_DATE = ifelse(PFS_STATUS == 1, pmin(DATE_FIRST_PROGRESSION, DATE_FIRST_RECURRENCE, DATE_DEATH, na.rm = TRUE), round(OS_MONTHS*30.44)),
+         PFS_DATE = ifelse(PFS_STATUS == 1, 
+                           pmin(DATE_FIRST_PROGRESSION, 
+                                DATE_FIRST_RECURRENCE, 
+                                DATE_DEATH, 
+                                na.rm = TRUE), 
+                           round(OS_MONTHS*30.44)),
          DAYS_TO_OS_EVENT = OS_DATE - DATE_FIRST_SURGERY,
          DAYS_TO_PFS_EVENT = PFS_DATE - DATE_FIRST_SURGERY,
          YEARS_TO_OS_EVENT = DAYS_TO_OS_EVENT/365.25, 
          YEARS_TO_PFS_EVENT = DAYS_TO_PFS_EVENT/365.25) |> 
-  select(PATIENT_ID, OS_STATUS, DAYS_TO_OS_EVENT, YEARS_TO_OS_EVENT, PFS_STATUS, DAYS_TO_PFS_EVENT, YEARS_TO_PFS_EVENT, DATE_FIRST_SURGERY)
+  select(PATIENT_ID, 
+         OS_STATUS, 
+         DAYS_TO_OS_EVENT, 
+         YEARS_TO_OS_EVENT, 
+         PFS_STATUS, 
+         DAYS_TO_PFS_EVENT, 
+         YEARS_TO_PFS_EVENT, 
+         DATE_FIRST_SURGERY)
 
 head(data_survival)
 
@@ -135,18 +171,21 @@ write_tsv(x = data_survival,
 
 data_survival |> 
   group_by(OS_STATUS) |> 
-  summarise(n(), mean(YEARS_TO_OS_EVENT))
+  summarise(n(), 
+            mean(YEARS_TO_OS_EVENT))
 
 data_survival |> 
   group_by(PFS_STATUS) |> 
-  summarise(n(), mean(YEARS_TO_PFS_EVENT))
+  summarise(n(), 
+            mean(YEARS_TO_PFS_EVENT))
 ```
 
 ```{r}
 #| label: km_curves
 #| message: false
 
-fit_OS <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ 1, data = data_survival)
+fit_OS <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ 1, 
+                  data = data_survival)
 
 ggsurvplot(
   fit = fit_OS,
@@ -164,7 +203,8 @@ ggsurvplot(
 
 ggsave("../results/02_KM_OS.png")
 
-fit_PFS <- survfit(Surv(YEARS_TO_PFS_EVENT, PFS_STATUS) ~ 1, data = data_survival)
+fit_PFS <- survfit(Surv(YEARS_TO_PFS_EVENT, PFS_STATUS) ~ 1, 
+                   data = data_survival)
 
 ggsurvplot(
   fit = fit_PFS,
@@ -181,4 +221,85 @@ ggsurvplot(
 ) 
 
 ggsave("../results/02_KM_PFS.png")
+```
+
+# Split data
+
+I will reserve 20% of the data for model testing. I use stratified splitting to ensure that both the training and testing set are balanced in terms of survival outcomes.
+
+```{r}
+#| label: split_data
+
+split <- data_survival |> 
+  mutate(strata = interaction(OS_STATUS, 
+                              PFS_STATUS)) |> 
+  initial_split(prop = 0.8, 
+                strata = strata)
+
+data_train <- training(split) |> 
+  select(-strata)
+
+data_test <- testing(split) |> 
+  select(-strata)
+
+write_tsv(x = data_train,
+          file = "../data/02_data_train.tsv")
+
+write_tsv(x = data_test,
+          file = "../data/02_data_test.tsv")
+```
+
+Evaluate if the training and test set are resembling each other:
+
+```{r}
+#| label: evaluate_split
+#| warning: false
+#| message: false
+
+data_train <- data_train |> 
+  mutate(split = "Train")
+
+data_test <- data_test |> 
+  mutate(split = "Test") 
+
+data_split <- bind_rows(data_train, 
+                        data_test)
+
+fit_OS_split <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ split, 
+                        data = data_split)
+
+ggsurvplot(
+  fit = fit_OS_split,
+  data = data_split,
+  title = "KM plot for OS by data split",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "top",
+  surv.median.line = "hv",
+  pval = TRUE
+) 
+
+ggsave("../results/02_KM_OS_split.png")
+
+fit_PFS_split <- survfit(Surv(YEARS_TO_PFS_EVENT, PFS_STATUS) ~ split, 
+                         data = data_split)
+
+ggsurvplot(
+  fit = fit_PFS_split,
+  data = data_split,
+  title = "KM plot for PFS by data split",
+  xlab = "Time (years)",
+  ylab = "PFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "top",
+  surv.median.line = "hv",
+  pval = TRUE
+) 
+
+ggsave("../results/02_KM_PFS_split.png")
 ```
