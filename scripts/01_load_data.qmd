@@ -185,7 +185,7 @@ Exploring selected timeline data:
 -   data_timeline_prior_meds
 -   **data_timeline_progression**
 -   data_timeline_psa_labs
--   data_timeline_radiation
+-   **data_timeline_radiation**
 -   data_timeline_specimen_surgery
 -   data_timeline_specimen
 -   **data_timeline_surgery**
@@ -262,6 +262,24 @@ head(data_timeline_progression)
 
 write_tsv(x = data_timeline_progression,
           file = "../data/01_data_timeline_progression.tsv")
+```
+
+### radiation
+
+```{r}
+#| label: load_timeline_radiation
+#| message: false
+#| warning: false
+
+data_timeline_radiation <- read_delim("../data/_raw/msk_chord_2024/data_timeline_radiation.txt",
+                                        delim = "\t")
+
+readLines("../data/_raw/msk_chord_2024/meta_timeline_radiation.txt")
+
+head(data_timeline_radiation) 
+
+write_tsv(x = data_timeline_radiation,
+          file = "../data/01_data_timeline_radiation.tsv")
 ```
 
 ### surgery

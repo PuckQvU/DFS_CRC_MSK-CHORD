@@ -33,30 +33,32 @@ is_ggplot <- function(x)is.ggplot(x)
 #| label: load_data
 #| message: false
 
-data_clinical_patient <- read_tsv("../data/01_data_clinical_patient.tsv")
 data_clinical_sample <- read_tsv("../data/01_data_clinical_sample.tsv")
 data_timeline_surgery <- read_tsv("../data/01_data_timeline_surgery.tsv")
+data_timeline_diagnosis <- read_tsv("../data/01_data_timeline_diagnosis.tsv")
 data_timeline_progression <- read_tsv("../data/01_data_timeline_progression.tsv")
+data_timeline_treatment <- read_tsv("../data/01_data_timeline_treatment.tsv")
+data_timeline_radiation <- read_tsv("../data/01_data_timeline_radiation.tsv")
 data_timeline_cancer_presence <- read_tsv("../data/01_data_timeline_cancer_presence.tsv")
-```
-
-# Select patients
-
-```{r}
-#| label: select_patients
-
-CRC_patients <- data_clinical_patient |> 
-  inner_join(data_clinical_sample, 
-             by = join_by(PATIENT_ID)) |> 
-  filter(CANCER_TYPE == "Colorectal Cancer",
-         STAGE_HIGHEST_RECORDED == "Stage 1-3") |> 
-  pull(PATIENT_ID) |> 
-  unique()
+data_clinical_patient <- read_tsv("../data/01_data_clinical_patient.tsv")
 ```
 
 # Prepare survival data
 
-First, find the date of the first surgery:
+For this project, I am selecting colorectal cancer patients who had stage I-III CRC at the time of surgery, and whose surgery was considered curative.
+
+First, I will select patients who had CRC:
+
+```{r}
+#| label: select_patients
+
+CRC_patients <- data_clinical_sample |> 
+  filter(CANCER_TYPE == "Colorectal Cancer") |> 
+  pull(PATIENT_ID) |> 
+  unique()
+```
+
+Then, I find the date of the first surgery:
 
 ```{r}
 #| label: first_surgery_date
@@ -65,13 +67,46 @@ first_surgery_dates <- data_timeline_surgery |>
   filter(SUBTYPE == "PROCEDURE",
          PATIENT_ID %in% CRC_patients) |> 
   group_by(PATIENT_ID) |> 
-  arrange(START_DATE) |> 
-  slice(1) |> 
-  select(PATIENT_ID,
-         DATE_FIRST_SURGERY = START_DATE)
+  summarise(DATE_FIRST_SURGERY = min(START_DATE))
 ```
 
-Then define the survival times based on the different end points:
+Next, I need to confirm the cancer stage at the time of surgery:
+
+```{r}
+#| label: cancer_stage
+
+CRC_patients <- data_timeline_diagnosis |> 
+  inner_join(first_surgery_dates, 
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= DATE_FIRST_SURGERY,
+         SUBTYPE == "Primary") |> 
+  group_by(PATIENT_ID) |> 
+  arrange(START_DATE) |> 
+  slice(1) |> 
+  filter(STAGE_CDM_DERIVED == "Stage 1-3") |> 
+  pull(PATIENT_ID) |> 
+  unique()
+```
+
+I select the patients for whom the surgery was curative:
+
+```{r}
+#| label: curative_surgery
+
+CRC_patients <- data_timeline_cancer_presence |> 
+  filter(PATIENT_ID %in% CRC_patients) |> 
+  inner_join(first_surgery_dates,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE > DATE_FIRST_SURGERY) |> 
+  group_by(PATIENT_ID) |> 
+  arrange(START_DATE) |> 
+  slice(1) |> 
+  filter(HAS_CANCER == "N") |> 
+  pull(PATIENT_ID) |> 
+  unique()
+```
+
+Finally, I define the survival data based on the different end points:
 
 ```{r}
 #| label: survival_data
@@ -88,19 +123,28 @@ data_survival <- first_surgery_dates |>
              join_by(PATIENT_ID)) |> 
   mutate(PROGRESSION = !is.na(DATE_FIRST_PROGRESSION)) 
 
+# Progression indicated by treatment
+# If chemotherapy, targeted treatment, or radiation started 180 days after surgery and 60 days after the last chemotherapy treatment ended, it indicates that the tumor has progressed after surgery.
+data_survival <- data_survival |> 
+  left_join(data_timeline_treatment,
+            by = join_by(PATIENT_ID)) |> 
+  bind_rows(data_timeline_radiation) |> 
+  filter(START_DATE > DATE_FIRST_SURGERY + 180,
+         SUBTYPE %in% c("Chemo", "Targeted", "Radiation Therapy")) |> 
+  group_by(PATIENT_ID) |> 
+  summarise(DATE_NEXT_TREATMENT = min(START_DATE)) |> 
+  left_join(data_timeline_treatment, 
+             by = join_by(PATIENT_ID)) |> 
+  filter(DATE_NEXT_TREATMENT - STOP_DATE > 60,
+         SUBTYPE == "Chemo") |> 
+  group_by(PATIENT_ID) |> 
+  summarise(DATE_NEXT_TREATMENT = min(DATE_NEXT_TREATMENT)) |> 
+  right_join(data_survival, 
+             by = join_by(PATIENT_ID)) |> 
+  mutate(PROGRESSION = ifelse(PROGRESSION, PROGRESSION, !is.na(DATE_NEXT_TREATMENT)))
+
 # Recurrence
 data_survival <- data_survival |> 
-  left_join(data_timeline_cancer_presence, 
-            join_by(PATIENT_ID)) |> 
-  filter(START_DATE > DATE_FIRST_SURGERY) |> 
-  group_by(PATIENT_ID) |> 
-  arrange(START_DATE) |> 
-  slice(1) |> 
-  filter(HAS_CANCER == "N") |> 
-  select(PATIENT_ID, 
-         DATE_FIRST_SURGERY, 
-         PROGRESSION, 
-         DATE_FIRST_PROGRESSION) |> 
   left_join(data_timeline_cancer_presence, 
             join_by(PATIENT_ID)) |> 
   filter(START_DATE > DATE_FIRST_SURGERY,
@@ -128,7 +172,8 @@ data_survival <- data_survival |>
 
 # Censor
 data_survival <- data_survival |> 
-  left_join(data_clinical_patient, join_by(PATIENT_ID)) |> 
+  left_join(data_clinical_patient, join_by(PATIENT_ID))|> 
+  filter(PATIENT_ID %in% CRC_patients) |> 
   group_by(PATIENT_ID) |> 
   mutate(OS_STATUS = ifelse(DEATH == FALSE, 
                             0, 
@@ -138,17 +183,29 @@ data_survival <- data_survival |>
                                DEATH == FALSE, 
                              0, 
                              1),
+         DFS_STATUS = ifelse(RECURRENCE == FALSE & 
+                               DEATH == FALSE, 
+                             0, 
+                             1),
          OS_DATE = round(OS_MONTHS*30.44),
          PFS_DATE = ifelse(PFS_STATUS == 1, 
                            pmin(DATE_FIRST_PROGRESSION, 
+                                DATE_NEXT_TREATMENT,
                                 DATE_FIRST_RECURRENCE, 
+                                DATE_DEATH, 
+                                na.rm = TRUE), 
+                           round(OS_MONTHS*30.44)),
+         DFS_DATE = ifelse(DFS_STATUS == 1, 
+                           pmin(DATE_FIRST_RECURRENCE, 
                                 DATE_DEATH, 
                                 na.rm = TRUE), 
                            round(OS_MONTHS*30.44)),
          DAYS_TO_OS_EVENT = OS_DATE - DATE_FIRST_SURGERY,
          DAYS_TO_PFS_EVENT = PFS_DATE - DATE_FIRST_SURGERY,
+         DAYS_TO_DFS_EVENT = DFS_DATE - DATE_FIRST_SURGERY,
          YEARS_TO_OS_EVENT = DAYS_TO_OS_EVENT/365.25, 
-         YEARS_TO_PFS_EVENT = DAYS_TO_PFS_EVENT/365.25) |> 
+         YEARS_TO_PFS_EVENT = DAYS_TO_PFS_EVENT/365.25, 
+         YEARS_TO_DFS_EVENT = DAYS_TO_DFS_EVENT/365.25) |> 
   select(PATIENT_ID, 
          OS_STATUS, 
          DAYS_TO_OS_EVENT, 
@@ -156,6 +213,9 @@ data_survival <- data_survival |>
          PFS_STATUS, 
          DAYS_TO_PFS_EVENT, 
          YEARS_TO_PFS_EVENT, 
+         DFS_STATUS, 
+         DAYS_TO_DFS_EVENT, 
+         YEARS_TO_DFS_EVENT, 
          DATE_FIRST_SURGERY)
 
 head(data_survival)
@@ -178,6 +238,11 @@ data_survival |>
   group_by(PFS_STATUS) |> 
   summarise(n(), 
             mean(YEARS_TO_PFS_EVENT))
+
+data_survival |> 
+  group_by(DFS_STATUS) |> 
+  summarise(n(), 
+            mean(YEARS_TO_DFS_EVENT))
 ```
 
 ```{r}
@@ -221,6 +286,25 @@ ggsurvplot(
 ) 
 
 ggsave("../results/02_KM_PFS.png")
+
+fit_DFS <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ 1, 
+                   data = data_survival)
+
+ggsurvplot(
+  fit = fit_DFS,
+  data = data_survival,
+  title = "KM plot for DFS after first CRC surgery",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "none",
+  risk.table = T,
+  surv.median.line = "hv"
+) 
+
+ggsave("../results/02_KM_DFS.png")
 ```
 
 # Split data
@@ -232,7 +316,8 @@ I will reserve 20% of the data for model testing. I use stratified splitting to 
 
 split <- data_survival |> 
   mutate(strata = interaction(OS_STATUS, 
-                              PFS_STATUS)) |> 
+                              PFS_STATUS,
+                              DFS_STATUS)) |> 
   initial_split(prop = 0.8, 
                 strata = strata)
 
@@ -302,4 +387,23 @@ ggsurvplot(
 ) 
 
 ggsave("../results/02_KM_PFS_split.png")
+
+fit_DFS_split <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ split, 
+                         data = data_split)
+
+ggsurvplot(
+  fit = fit_PFS_split,
+  data = data_split,
+  title = "KM plot for DFS by data split",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "top",
+  surv.median.line = "hv",
+  pval = TRUE
+) 
+
+ggsave("../results/02_KM_DFS_split.png")
 ```
