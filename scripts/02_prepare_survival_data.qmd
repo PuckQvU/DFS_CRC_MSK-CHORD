@@ -392,7 +392,7 @@ fit_DFS_split <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ split,
                          data = data_split)
 
 ggsurvplot(
-  fit = fit_PFS_split,
+  fit = fit_DFS_split,
   data = data_split,
   title = "KM plot for DFS by data split",
   xlab = "Time (years)",
