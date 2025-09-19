@@ -112,7 +112,9 @@ data_survival <- data_survival |>
             by = join_by(PATIENT_ID)) |> 
   bind_rows(data_timeline_radiation) |> 
   filter(START_DATE > DATE_FIRST_SURGERY + 180,
-         SUBTYPE %in% c("Chemo", "Targeted", "Radiation Therapy")) |> 
+         SUBTYPE %in% c("Chemo", 
+                        "Targeted", 
+                        "Radiation Therapy")) |> 
   group_by(PATIENT_ID) |> 
   summarise(DATE_NEXT_TREATMENT = min(START_DATE)) |> 
   left_join(data_timeline_treatment, 
@@ -123,7 +125,9 @@ data_survival <- data_survival |>
   summarise(DATE_NEXT_TREATMENT = min(DATE_NEXT_TREATMENT)) |> 
   right_join(data_survival, 
              by = join_by(PATIENT_ID)) |> 
-  mutate(PROGRESSION = ifelse(PROGRESSION, PROGRESSION, !is.na(DATE_NEXT_TREATMENT)))
+  mutate(PROGRESSION = ifelse(PROGRESSION, 
+                              PROGRESSION, 
+                              !is.na(DATE_NEXT_TREATMENT)))
 
 # Recurrence
 data_survival <- data_survival |> 
@@ -154,7 +158,8 @@ data_survival <- data_survival |>
 
 # Censor
 data_survival <- data_survival |> 
-  left_join(data_clinical_patient, join_by(PATIENT_ID))|> 
+  left_join(data_clinical_patient, 
+            join_by(PATIENT_ID))|> 
   filter(PATIENT_ID %in% CRC_patients) |> 
   group_by(PATIENT_ID) |> 
   mutate(OS_STATUS = ifelse(DEATH == FALSE, 
@@ -231,7 +236,8 @@ data_survival |>
 #| label: km_curves
 #| message: false
 
-fit_OS <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ 1, 
+fit_OS <- survfit(Surv(YEARS_TO_OS_EVENT, 
+                       OS_STATUS) ~ 1, 
                   data = data_survival)
 
 ggsurvplot(
@@ -250,7 +256,8 @@ ggsurvplot(
 
 ggsave("../results/02_KM_OS.png")
 
-fit_PFS <- survfit(Surv(YEARS_TO_PFS_EVENT, PFS_STATUS) ~ 1, 
+fit_PFS <- survfit(Surv(YEARS_TO_PFS_EVENT, 
+                        PFS_STATUS) ~ 1, 
                    data = data_survival)
 
 ggsurvplot(
@@ -269,7 +276,8 @@ ggsurvplot(
 
 ggsave("../results/02_KM_PFS.png")
 
-fit_DFS <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ 1, 
+fit_DFS <- survfit(Surv(YEARS_TO_DFS_EVENT, 
+                        DFS_STATUS) ~ 1, 
                    data = data_survival)
 
 ggsurvplot(
@@ -332,7 +340,8 @@ data_test <- data_test |>
 data_split <- bind_rows(data_train, 
                         data_test)
 
-fit_OS_split <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ split, 
+fit_OS_split <- survfit(Surv(YEARS_TO_OS_EVENT, 
+                             OS_STATUS) ~ split, 
                         data = data_split)
 
 ggsurvplot(
@@ -351,7 +360,8 @@ ggsurvplot(
 
 ggsave("../results/02_KM_OS_split.png")
 
-fit_PFS_split <- survfit(Surv(YEARS_TO_PFS_EVENT, PFS_STATUS) ~ split, 
+fit_PFS_split <- survfit(Surv(YEARS_TO_PFS_EVENT, 
+                              PFS_STATUS) ~ split, 
                          data = data_split)
 
 ggsurvplot(
@@ -370,7 +380,8 @@ ggsurvplot(
 
 ggsave("../results/02_KM_PFS_split.png")
 
-fit_DFS_split <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ split, 
+fit_DFS_split <- survfit(Surv(YEARS_TO_DFS_EVENT, 
+                              DFS_STATUS) ~ split, 
                          data = data_split)
 
 ggsurvplot(
