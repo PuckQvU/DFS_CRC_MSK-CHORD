@@ -186,8 +186,8 @@ Exploring selected timeline data:
 -   **data_timeline_progression**
 -   data_timeline_psa_labs
 -   **data_timeline_radiation**
--   data_timeline_specimen_surgery
--   data_timeline_specimen
+-   **data_timeline_specimen_surgery**
+-   **data_timeline_specimen**
 -   **data_timeline_surgery**
 -   **data_timeline_treatment**
 -   data_timeline_tumor_sites
@@ -280,6 +280,42 @@ head(data_timeline_radiation)
 
 write_tsv(x = data_timeline_radiation,
           file = "../data/01_data_timeline_radiation.tsv")
+```
+
+### specimen_surgery
+
+```{r}
+#| label: load_timeline_specimen_surgery
+#| message: false
+#| warning: false
+
+data_timeline_specimen_surgery <- read_delim("../data/_raw/msk_chord_2024/data_timeline_specimen_surgery.txt",
+                                    delim = "\t")
+
+readLines("../data/_raw/msk_chord_2024/meta_timeline_specimen_surgery.txt")
+
+head(data_timeline_specimen_surgery) 
+
+write_tsv(x = data_timeline_specimen_surgery,
+          file = "../data/01_data_timeline_specimen_surgery.tsv")
+```
+
+### specimen
+
+```{r}
+#| label: load_timeline_specimen
+#| message: false
+#| warning: false
+
+data_timeline_specimen <- read_delim("../data/_raw/msk_chord_2024/data_timeline_specimen.txt",
+                                    delim = "\t")
+
+readLines("../data/_raw/msk_chord_2024/meta_timeline_specimen.txt")
+
+head(data_timeline_specimen) 
+
+write_tsv(x = data_timeline_specimen,
+          file = "../data/01_data_timeline_specimen.tsv")
 ```
 
 ### surgery

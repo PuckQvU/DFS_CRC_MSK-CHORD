@@ -88,24 +88,6 @@ CRC_patients <- data_timeline_diagnosis |>
   unique()
 ```
 
-I select the patients for whom the surgery was curative:
-
-```{r}
-#| label: curative_surgery
-
-CRC_patients <- data_timeline_cancer_presence |> 
-  filter(PATIENT_ID %in% CRC_patients) |> 
-  inner_join(first_surgery_dates,
-             by = join_by(PATIENT_ID)) |> 
-  filter(START_DATE > DATE_FIRST_SURGERY) |> 
-  group_by(PATIENT_ID) |> 
-  arrange(START_DATE) |> 
-  slice(1) |> 
-  filter(HAS_CANCER == "N") |> 
-  pull(PATIENT_ID) |> 
-  unique()
-```
-
 Finally, I define the survival data based on the different end points:
 
 ```{r}
