@@ -1,0 +1,2239 @@
+---
+title: "Prepare and explore explanatory variables"
+author: "Puck Quarles van Ufford"
+format: html
+---
+
+```{r}
+#| label: packages
+#| message: false
+
+library("tidyverse")
+library("survival")
+library("survminer")
+library("table1")
+library("patchwork")
+```
+
+```{r}
+#| label: fix_mistake_survminer_package
+#| echo: false
+
+is_ggplot <- function(x)is.ggplot(x)
+```
+
+# Load data
+
+```{r}
+#| label: load_data
+#| message: false
+
+data_train <- read_tsv("../data/02_data_train.tsv")
+data_clinical_patient <- read_tsv("../data/01_data_clinical_patient.tsv")
+data_clinical_sample <- read_tsv("../data/01_data_clinical_sample.tsv")
+data_timeline_sample_acquisition <- read_tsv("../data/01_data_timeline_specimen_surgery.tsv")
+data_labs_ca_15_3 <- read_tsv("../data/01_data_timeline_ca_15_3_labs.tsv")
+data_labs_ca_19_9 <- read_tsv("../data/01_data_timeline_ca_19_9_labs.tsv")
+data_labs_cea  <- read_tsv("../data/01_data_timeline_cea_labs.tsv")
+data_labs_psa  <- read_tsv("../data/01_data_timeline_psa_labs.tsv")
+data_tumor_gleason  <- read_tsv("../data/01_data_timeline_gleason.tsv")
+data_tumor_mmr  <- read_tsv("../data/01_data_timeline_mmr.tsv")
+data_tumor_pdl1  <- read_tsv("../data/01_data_timeline_pdl1.tsv")
+data_tumor_site  <- read_tsv("../data/01_data_timeline_tumor_sites.tsv")
+data_performance_status  <- read_tsv("../data/01_data_timeline_performance_status.tsv")
+data_treatment  <- read_tsv("../data/01_data_timeline_treatment.tsv")
+data_radiation  <- read_tsv("../data/01_data_timeline_radiation.tsv")
+data_prior_meds  <- read_tsv("../data/01_data_timeline_prior_meds.tsv")
+data_cna <- read_tsv("../data/01_data_cna.tsv")
+data_mutations <- read_tsv("../data/01_data_mutations.tsv")
+data_sv <- read_tsv("../data/01_data_sv.tsv")
+```
+
+# Clinical data
+
+## Clinical patient data
+
+Note: the NLP-derived tumor site data will be taken from data_timeline_tumor_sites. This is done to ensure we only use information that was available at the time of the surgery.
+
+### Clean the data
+
+```{r}
+#| label: clean_data_clinical_patient
+
+data_clinical_patient_clean <- data_clinical_patient |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  mutate(RACE = case_when(RACE == "White" ~ "White",
+                          RACE == "Black Or African American" ~ "Black",
+                          RACE == "Asian-Far East/Indian Subcont" ~ "Asian",
+                          RACE == "Unknown" | RACE == "Pt Refused to Answer" ~ NA,
+                          TRUE ~ "Other"),
+         ETHNICITY = case_when(ETHNICITY == "Non-Spanish; Non-Hispanic" ~ "Non-Spanish; Non-Hispanic",
+                               ETHNICITY == "Unknown whether Spanish or not" ~ NA,
+                               TRUE ~ "Spanish/Hispanic"),
+         AGE_BRACKET = case_when(CURRENT_AGE_DEID < 40 ~ "<40",
+                                 CURRENT_AGE_DEID < 50 ~ "40-49",
+                                 CURRENT_AGE_DEID < 60 ~ "50-59",
+                                 CURRENT_AGE_DEID < 70 ~ "60-69",
+                                 CURRENT_AGE_DEID < 80 ~ "70-79",
+                                 CURRENT_AGE_DEID < 90 ~ "80-89",
+                                 TRUE ~ "90+"),
+         SMOKING = ifelse(SMOKING_PREDICTIONS_3_CLASSES == "Unknown", 
+                          NA, 
+                          SMOKING_PREDICTIONS_3_CLASSES),
+         PRIOR_TREATMENT = ifelse(PRIOR_MED_TO_MSK == "Unknown", 
+                                  NA, 
+                                  PRIOR_MED_TO_MSK)) |> 
+  select(PATIENT_ID,
+         GENDER,
+         RACE,
+         ETHNICITY,
+         AGE = CURRENT_AGE_DEID,
+         AGE_BRACKET,
+         SMOKING,
+         PRIOR_TREATMENT
+         )
+
+write_tsv(x = data_clinical_patient_clean,
+          file = "../data/03_data_clinical_patient_clean.tsv")
+
+data_clinical_patient <- data_clinical_patient_clean |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID))
+```
+
+### Table 1
+
+```{r}
+#| label: table_1_clinical_patient
+#| warning: false
+
+table1(~ factor(GENDER) + 
+         factor(RACE) + 
+         factor(ETHNICITY) +
+         AGE + 
+         factor(AGE_BRACKET) +
+         factor(SMOKING) +
+         factor(PRIOR_TREATMENT), 
+       data = data_clinical_patient_clean)
+```
+
+### Variable effects on OS and DFS
+
+#### Gender
+
+```{r}
+#| label: Gender
+#| warning: false
+#| message: false
+
+fit_OS_GENDER <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ GENDER, 
+                         data = data_clinical_patient)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ GENDER, 
+      data = data_clinical_patient)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_GENDER,
+  data = data_clinical_patient,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("Female", "Male"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_GENDER <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ GENDER, 
+                         data = data_clinical_patient)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ GENDER, 
+      data = data_clinical_patient)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_GENDER,
+  data = data_clinical_patient,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("Female", "Male"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+#### Race
+
+```{r}
+#| label: Race
+#| warning: false
+#| message: false
+
+fit_OS_RACE <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ RACE,
+                       data = data_clinical_patient)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ RACE, 
+      data = data_clinical_patient)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_RACE,
+  data = data_clinical_patient,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("Asian", "Black", "Other", "White"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_RACE <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ RACE, 
+                        data = data_clinical_patient)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ RACE, 
+      data = data_clinical_patient)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_RACE,
+  data = data_clinical_patient,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("Asian", "Black", "Other", "White"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+#### Ethnicity
+
+```{r}
+#| label: Ethnicity
+#| warning: false
+#| message: false
+
+fit_OS_ETHNICITY <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ ETHNICITY,
+                            data = data_clinical_patient)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ ETHNICITY, 
+      data = data_clinical_patient)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_ETHNICITY,
+  data = data_clinical_patient,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("Non-Spanish; Non-Hispanic", "Spanish/Hispanic"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_ETHNICITY <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ ETHNICITY, 
+                             data = data_clinical_patient)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ ETHNICITY, 
+      data = data_clinical_patient)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_ETHNICITY,
+  data = data_clinical_patient,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("Non-Spanish; Non-Hispanic", "Spanish/Hispanic"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+#### Age
+
+```{r}
+#| label: Age
+#| warning: false
+#| message: false
+
+fit_OS_AGE <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ AGE_BRACKET,
+                      data = data_clinical_patient)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ AGE, 
+      data = data_clinical_patient)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_AGE,
+  data = data_clinical_patient,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("< 40", "40-49", "50-59", "60-69", "70-79", "80-89"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_AGE <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ AGE_BRACKET, 
+                       data = data_clinical_patient)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ AGE, 
+      data = data_clinical_patient)
+
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_AGE,
+  data = data_clinical_patient,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("< 40", "40-49", "50-59", "60-69", "70-79", "80-89"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+#### Smoking status (NLP)
+
+```{r}
+#| label: Smoking_status
+#| warning: false
+#| message: false
+
+fit_OS_SMOKING <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ SMOKING, 
+                         data = data_clinical_patient)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ SMOKING, 
+      data = data_clinical_patient)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_SMOKING,
+  data = data_clinical_patient,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("Former/current smoker", "Never smoked"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_SMOKING <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ SMOKING,
+                          data = data_clinical_patient)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ SMOKING, 
+      data = data_clinical_patient)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_SMOKING,
+  data = data_clinical_patient,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("Former/current smoker", "Never smoked"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+#### Prior treatment before MSK (NLP)
+
+```{r}
+#| label: Prior_treament
+#| warning: false
+#| message: false
+
+fit_OS_PRIOR_TREATMENT <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ PRIOR_TREATMENT,
+                                   data = data_clinical_patient)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ PRIOR_TREATMENT, 
+      data = data_clinical_patient)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_PRIOR_TREATMENT,
+  data = data_clinical_patient,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("No prior treatments", "Prior treatments"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_PRIOR_TREATMENT <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ PRIOR_TREATMENT,
+                                    data = data_clinical_patient)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ PRIOR_TREATMENT, 
+      data = data_clinical_patient)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_PRIOR_TREATMENT,
+  data = data_clinical_patient,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("No prior treatments", "Prior treatments"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+## Clinical sample data
+
+### Select samples
+
+```{r}
+#| label: select_data_clinical_sample
+
+## Select only patients who were samples before or during the surgery
+patients_sampled <- data_train |> 
+  inner_join(data_timeline_sample_acquisition,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= DATE_FIRST_SURGERY) |> 
+  pull(PATIENT_ID)
+
+## Identify patients with multiple samples
+patients_2_samples <- data_timeline_sample_acquisition |> 
+  filter(PATIENT_ID %in% patients_sampled) |> 
+  group_by(PATIENT_ID) |> 
+  summarise(n = n()) |> 
+  filter(n > 1) |> 
+  pull(PATIENT_ID)
+
+## Select their CRC sample
+patients_2_samples <- data_clinical_sample |> 
+  filter(PATIENT_ID %in% patients_2_samples,
+         CANCER_TYPE == "Colorectal Cancer")  |> 
+  select(PATIENT_ID, SAMPLE_ID)
+
+## Filter the sample data
+data_clinical_sample_selected <- data_clinical_sample |> 
+  filter(PATIENT_ID %in% patients_sampled) |> 
+  left_join(patients_2_samples,
+            by = join_by(PATIENT_ID),
+            suffix = c("", "_SELECTED")) |> 
+  filter(is.na(SAMPLE_ID_SELECTED) | SAMPLE_ID == SAMPLE_ID_SELECTED) |> 
+  select(-SAMPLE_ID_SELECTED)
+
+map_sample_patient <- data_clinical_sample_selected |> 
+  select(SAMPLE_ID, PATIENT_ID)
+
+write_tsv(x = map_sample_patient,
+          file = "../data/03_map_sample_patient.tsv")
+```
+
+### Clean the data
+
+```{r}
+#| label: clean_data_clinical_sample
+
+data_clinical_sample_clean <- data_clinical_sample_selected |> 
+  mutate(SAMPLE_TYPE = ifelse(SAMPLE_TYPE == "Unknown", 
+                              NA,
+                              SAMPLE_TYPE),
+         PRIMARY_SITE = case_when(PRIMARY_SITE == "Ascending colon" | PRIMARY_SITE == "Ascending Colon" ~ "Ascending Colon",
+                                  PRIMARY_SITE == "Bowel" ~ "Bowel",
+                                  PRIMARY_SITE == "Cecum" ~ "Cecum",
+                                  PRIMARY_SITE == "colon" | PRIMARY_SITE == "Colon" ~ "Colon",
+                                  PRIMARY_SITE == "Descending Colon" ~ "Descending Colon",
+                                  PRIMARY_SITE == "Hepatic flexure" ~ "Hepatic Flexure",
+                                  PRIMARY_SITE == "Rectosigmoid Colon" | PRIMARY_SITE == "Rectosigmoid Colon,Bowel" ~ "Rectosigmoid Colon",
+                                  PRIMARY_SITE == "Rectum" ~ "Rectum",
+                                  PRIMARY_SITE == "Sigmoid colon" | PRIMARY_SITE == "Sigmoid Colon" ~ "Sigmoid Colon",
+                                  PRIMARY_SITE == "Transverse colon" | PRIMARY_SITE == "Transverse Colon" ~ "Transverse Colon"),
+         MSI_TYPE = ifelse(MSI_TYPE == "Do not report", 
+                           NA, 
+                           MSI_TYPE),
+         SAMPLE_COVERAGE_CAT = ifelse(SAMPLE_COVERAGE < median(SAMPLE_COVERAGE, 
+                                                               na.rm = TRUE),
+                                      "low",
+                                      "high"),
+         TUMOR_PURITY_CAT = ifelse(TUMOR_PURITY < median(TUMOR_PURITY, 
+                                                         na.rm = TRUE),
+                                   "low",
+                                   "high"),
+         CLINICAL_GROUP_SIMPLIFIED = case_when(CLINICAL_GROUP == "0" ~ "0",
+                                               CLINICAL_GROUP == "1" ~ "1",
+                                               CLINICAL_GROUP %in% c("2", "2A", "2B", "2C") ~ "2",
+                                               CLINICAL_GROUP %in% c("3", "3A", "3B", "3C") ~ "3"),
+         PATHOLOGICAL_GROUP_SIMPLIFIED = case_when(PATHOLOGICAL_GROUP == "0" ~ "0",
+                                                   PATHOLOGICAL_GROUP == "1" ~ "1",
+                                                   PATHOLOGICAL_GROUP %in% c("2", "2A", "2B", "2C") ~ "2",
+                                                   PATHOLOGICAL_GROUP %in% c("3", "3A", "3B", "3C") ~ "3"),
+         CLINICAL_SUMMARY_SIMPLIFIED = case_when(CLINICAL_SUMMARY %in% c("Distant", "Distant Metastases/Systemic Disease") ~ "Distant",
+                                                 CLINICAL_SUMMARY %in% c("Regional Both 2 and 3", "Regional by Direct Extension", "Regional Nos", "Regional To Lymph Nodes", "Regional,Direct Extension", "Regional,Extension and Nodes", "Regional,Lymph Nodes Only") ~ "Regional",
+                                                 CLINICAL_SUMMARY %in% c("Unknown/Unstaged", "Unstaged Unknown") ~ NA,
+                                                 TRUE ~ CLINICAL_SUMMARY),
+         TMB_CAT = ifelse(TMB_NONSYNONYMOUS < median(TMB_NONSYNONYMOUS, 
+                                                     na.rm = TRUE),
+                                      "low",
+                                      "high")) |> 
+  select(PATIENT_ID,
+         SAMPLE_ID,
+         SAMPLE_TYPE,
+         PRIMARY_SITE,
+         GENE_PANEL,
+         SAMPLE_COVERAGE,
+         SAMPLE_COVERAGE_CAT,
+         TUMOR_PURITY,
+         TUMOR_PURITY_CAT,
+         ONCOTREE_CODE,
+         MSI_SCORE,
+         MSI_TYPE,
+         CLINICAL_GROUP,
+         CLINICAL_GROUP_SIMPLIFIED,
+         PATHOLOGICAL_GROUP,
+         PATHOLOGICAL_GROUP_SIMPLIFIED,
+         CLINICAL_SUMMARY,
+         CLINICAL_SUMMARY_SIMPLIFIED,
+         DIAGNOSIS_DESCRIPTION,
+         TMB_NONSYNONYMOUS,
+         TMB_CAT)
+
+write_tsv(x = data_clinical_sample_clean,
+          file = "../data/03_data_clinical_sample_clean.tsv")
+
+data_clinical_sample <- data_clinical_sample_clean |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID))
+```
+
+### Table 1
+
+```{r}
+#| label: table_1_clinical_sample
+#| warning: false
+
+table1(~ factor(SAMPLE_TYPE) + 
+         factor(PRIMARY_SITE) + 
+         factor(GENE_PANEL) +
+         SAMPLE_COVERAGE +
+         TUMOR_PURITY +
+         factor(ONCOTREE_CODE) +
+         MSI_SCORE +
+         factor(MSI_TYPE) +
+         factor(CLINICAL_GROUP) +
+         factor(PATHOLOGICAL_GROUP) +
+         factor(CLINICAL_SUMMARY) +
+         factor(DIAGNOSIS_DESCRIPTION) +
+         TMB_NONSYNONYMOUS, 
+       data = data_clinical_sample_clean)
+```
+
+### Variable effects on OS and DFS
+
+#### Sample type
+
+```{r}
+#| label: Sample_type
+#| warning: false
+#| message: false
+
+fit_OS_SAMPLE_TYPE <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ SAMPLE_TYPE, 
+                              data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ SAMPLE_TYPE, 
+      data = data_clinical_sample)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_SAMPLE_TYPE,
+  data = data_clinical_sample,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("Local Recurrence", "Metastasis", "Primary"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_SAMPLE_TYPE <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ SAMPLE_TYPE, 
+                               data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ SAMPLE_TYPE, 
+      data = data_clinical_sample)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_SAMPLE_TYPE,
+  data = data_clinical_sample,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("Local Recurrence", "Metastasis", "Primary"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+#### Primary site
+
+```{r}
+#| label: Primary_site
+#| warning: false
+#| message: false
+
+fit_OS_PRIMARY_SITE <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ PRIMARY_SITE, 
+                               data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ PRIMARY_SITE, 
+      data = data_clinical_sample)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_PRIMARY_SITE,
+  data = data_clinical_sample,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("Ascending Colon", "Bowel", "Cecum", "Colon", "Descending Colon", "Hepatic Flexure", "Rectosigmoid Colon", "Rectum", "Sigmoid Colon", "Transverse Colon"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_PRIMARY_SITE <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ PRIMARY_SITE,
+                                data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ PRIMARY_SITE, 
+      data = data_clinical_sample)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_PRIMARY_SITE,
+  data = data_clinical_sample,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("Ascending Colon", "Bowel", "Cecum", "Colon", "Descending Colon", "Hepatic Flexure", "Rectosigmoid Colon", "Rectum", "Sigmoid Colon", "Transverse Colon"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+#### Gene panel
+
+```{r}
+#| label: Gene_panel
+#| warning: false
+#| message: false
+
+fit_OS_GENE_PANEL <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ GENE_PANEL, 
+                             data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ GENE_PANEL, 
+      data = data_clinical_sample)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_GENE_PANEL,
+  data = data_clinical_sample,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("IMPACT341", "IMPACT410", "IMPACT468", "IMPACT505"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_GENE_PANEL <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ GENE_PANEL,
+                              data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ GENE_PANEL, 
+      data = data_clinical_sample)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_GENE_PANEL,
+  data = data_clinical_sample,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("IMPACT341", "IMPACT410", "IMPACT468", "IMPACT505"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+#### Sample coverage
+
+```{r}
+#| label: Sample_coverage
+#| warning: false
+#| message: false
+
+fit_OS_SAMPLE_COVERAGE_CAT <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ SAMPLE_COVERAGE_CAT, 
+                                      data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ SAMPLE_COVERAGE_CAT, 
+      data = data_clinical_sample)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_SAMPLE_COVERAGE_CAT,
+  data = data_clinical_sample,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("high", "low"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_SAMPLE_COVERAGE_CAT <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ SAMPLE_COVERAGE_CAT,
+                                       data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ SAMPLE_COVERAGE_CAT, 
+      data = data_clinical_sample)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_SAMPLE_COVERAGE_CAT,
+  data = data_clinical_sample,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("high", "low"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+#### Tumor purity
+
+```{r}
+#| label: Tumor_purity
+#| warning: false
+#| message: false
+
+fit_OS_TUMOR_PURITY_CAT <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ TUMOR_PURITY_CAT, 
+                                   data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ TUMOR_PURITY_CAT, 
+      data = data_clinical_sample)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_TUMOR_PURITY_CAT,
+  data = data_clinical_sample,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("high", "low"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_TUMOR_PURITY_CAT <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ TUMOR_PURITY_CAT,
+                                    data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ TUMOR_PURITY_CAT, 
+      data = data_clinical_sample)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_TUMOR_PURITY_CAT,
+  data = data_clinical_sample,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("high", "low"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+#### Oncotree code
+
+```{r}
+#| label: Oncotree code
+#| warning: false
+#| message: false
+
+fit_OS_ONCOTREE_CODE <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ ONCOTREE_CODE, 
+                                data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ ONCOTREE_CODE, 
+      data = data_clinical_sample)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_ONCOTREE_CODE,
+  data = data_clinical_sample,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("CMC", "COAD", "COADREAD", "MACR", "READ", "SRCCR"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_ONCOTREE_CODE <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ ONCOTREE_CODE,
+                                 data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ ONCOTREE_CODE, 
+      data = data_clinical_sample)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_ONCOTREE_CODE,
+  data = data_clinical_sample,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("CMC", "COAD", "COADREAD", "MACR", "READ", "SRCCR"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+#### MSI
+
+```{r}
+#| label: MSI
+#| warning: false
+#| message: false
+
+fit_OS_MSI_TYPE <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ MSI_TYPE, 
+                           data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ MSI_TYPE, 
+      data = data_clinical_sample)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_MSI_TYPE,
+  data = data_clinical_sample,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("Indeterminate", "Instable", "Stable"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_MSI_TYPE <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ MSI_TYPE,
+                            data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ MSI_TYPE, 
+      data = data_clinical_sample)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_MSI_TYPE,
+  data = data_clinical_sample,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("Indeterminate", "Instable", "Stable"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+#### Clinical stage
+
+```{r}
+#| label: Clinical stage
+#| warning: false
+#| message: false
+
+fit_OS_CLINICAL_GROUP <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ CLINICAL_GROUP,
+                                 data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ CLINICAL_GROUP, 
+      data = data_clinical_sample)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_CLINICAL_GROUP,
+  data = data_clinical_sample,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("0", "1", "2", "2A", "2B", "2C", "3A", "3B", "3C"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_CLINICAL_GROUP <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ CLINICAL_GROUP,
+                                  data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ CLINICAL_GROUP, 
+      data = data_clinical_sample)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_CLINICAL_GROUP,
+  data = data_clinical_sample,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("0", "1", "2", "2A", "2B", "2C", "3A", "3B", "3C"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+```{r}
+#| label: Clinical_stage_simplified
+#| warning: false
+#| message: false
+
+fit_OS_CLINICAL_GROUP_SIMPLIFIED <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ CLINICAL_GROUP_SIMPLIFIED,
+                                            data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ CLINICAL_GROUP_SIMPLIFIED, 
+      data = data_clinical_sample)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_CLINICAL_GROUP_SIMPLIFIED,
+  data = data_clinical_sample,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("0", "1", "2", "3"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_CLINICAL_GROUP_SIMPLIFIED <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ CLINICAL_GROUP_SIMPLIFIED,
+                                             data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ CLINICAL_GROUP_SIMPLIFIED, 
+      data = data_clinical_sample)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_CLINICAL_GROUP_SIMPLIFIED,
+  data = data_clinical_sample,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("0", "1", "2", "3"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+#### Pathology stage
+
+```{r}
+#| label: Pathology_stage
+#| warning: false
+#| message: false
+
+fit_OS_PATHOLOGICAL_GROUP <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ PATHOLOGICAL_GROUP, 
+                                     data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ PATHOLOGICAL_GROUP, 
+      data = data_clinical_sample)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_PATHOLOGICAL_GROUP,
+  data = data_clinical_sample,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("0", "1", "2", "2A", "2B", "2C", "3", "3A", "3B", "3C"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_PATHOLOGICAL_GROUP <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ PATHOLOGICAL_GROUP,
+                                      data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ PATHOLOGICAL_GROUP, 
+      data = data_clinical_sample)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_PATHOLOGICAL_GROUP,
+  data = data_clinical_sample,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("0", "1", "2", "2A", "2B", "2C", "3", "3A", "3B", "3C"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+```{r}
+#| label: Pathology_stage_simplified
+#| warning: false
+#| message: false
+
+fit_OS_PATHOLOGICAL_GROUP_SIMPLIFIED <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ PATHOLOGICAL_GROUP_SIMPLIFIED,
+                                            data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ PATHOLOGICAL_GROUP_SIMPLIFIED, 
+      data = data_clinical_sample)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_PATHOLOGICAL_GROUP_SIMPLIFIED,
+  data = data_clinical_sample,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("0", "1", "2", "3"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_PATHOLOGICAL_GROUP_SIMPLIFIED <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ PATHOLOGICAL_GROUP_SIMPLIFIED,
+                                             data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ PATHOLOGICAL_GROUP_SIMPLIFIED, 
+      data = data_clinical_sample)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_PATHOLOGICAL_GROUP_SIMPLIFIED,
+  data = data_clinical_sample,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("0", "1", "2", "3"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+#### Clinical summary
+
+```{r}
+#| label: Clinical_summary
+#| warning: false
+#| message: false
+
+fit_OS_CLINICAL_SUMMARY_SIMPLIFIED <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ CLINICAL_SUMMARY_SIMPLIFIED, 
+                                              data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ CLINICAL_SUMMARY_SIMPLIFIED, 
+      data = data_clinical_sample)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_CLINICAL_SUMMARY_SIMPLIFIED,
+  data = data_clinical_sample,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("Distant", "In Situ", "Localized", "Regional"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_CLINICAL_SUMMARY_SIMPLIFIED <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ CLINICAL_SUMMARY_SIMPLIFIED,
+                                               data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ CLINICAL_SUMMARY_SIMPLIFIED, 
+      data = data_clinical_sample)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_CLINICAL_SUMMARY_SIMPLIFIED,
+  data = data_clinical_sample,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("Distant", "In Situ", "Localized", "Regional"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+#### Diagnosis description
+
+```{r}
+#| label: Diagnosis description
+#| warning: false
+#| message: false
+
+fit_OS_DIAGNOSIS_DESCRIPTION <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ DIAGNOSIS_DESCRIPTION, 
+                                        data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ DIAGNOSIS_DESCRIPTION, 
+      data = data_clinical_sample)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_DIAGNOSIS_DESCRIPTION,
+  data = data_clinical_sample,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("Anus/Anal canal/Anorectum", "Ascending colon", "Cecum", "Descending colon", "Hepatic Felxure", "Colon NOS", "Rectosigmoid junction", "Rectum", "Sigmoid colon", "Splenic flexure", "Transverse colon"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_DIAGNOSIS_DESCRIPTION <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ DIAGNOSIS_DESCRIPTION,
+                                         data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ DIAGNOSIS_DESCRIPTION, 
+      data = data_clinical_sample)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_DIAGNOSIS_DESCRIPTION,
+  data = data_clinical_sample,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("Anus/Anal canal/Anorectum", "Ascending colon", "Cecum", "Descending colon", "Hepatic Felxure", "Colon NOS", "Rectosigmoid junction", "Rectum", "Sigmoid colon", "Splenic flexure", "Transverse colon"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+#### Tumor mutational burden
+
+```{r}
+#| label: TMB
+#| warning: false
+#| message: false
+
+fit_OS_TMB_CAT <- survfit(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ TMB_CAT, 
+                          data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_OS_EVENT, OS_STATUS) ~ TMB_CAT, 
+      data = data_clinical_sample)
+
+p1 <- ggsurvplot(
+  fit = fit_OS_TMB_CAT,
+  data = data_clinical_sample,
+  title = "OS",
+  xlab = "Time (years)",
+  ylab = "OS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("high", "low"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+fit_DFS_TMB_CAT <- survfit(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ TMB_CAT,
+                           data = data_clinical_sample)
+
+coxph(Surv(YEARS_TO_DFS_EVENT, DFS_STATUS) ~ TMB_CAT, 
+      data = data_clinical_sample)
+
+p2 <- ggsurvplot(
+  fit = fit_DFS_TMB_CAT,
+  data = data_clinical_sample,
+  title = "DFS",
+  xlab = "Time (years)",
+  ylab = "DFS probability",
+  xlim = c(0, 10), 
+  ylim = c(0, 1),
+  break.time.by = 2,
+  legend = "bottom",
+  legend.labs = c("high", "low"),
+  pval = TRUE,
+  pval.method = TRUE,
+  censor = FALSE
+) 
+
+(p1$plot + p2$plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+## Most recent labs
+
+### Clean the data
+
+```{r}
+#| label: clean_labs
+
+data_labs_ca_15_3_clean <- data_labs_ca_15_3 |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= DATE_FIRST_SURGERY) |> 
+  group_by(PATIENT_ID) |> 
+  arrange(desc(START_DATE)) |> 
+  slice(1) |> 
+  ungroup() |> 
+  select(PATIENT_ID,
+         START_DATE,
+         DATE_FIRST_SURGERY,
+         TEST,
+         RESULT) |> 
+  mutate(DAYS_BEFORE_SURGERY = DATE_FIRST_SURGERY - START_DATE)
+
+data_labs_ca_19_9_clean <- data_labs_ca_19_9 |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= DATE_FIRST_SURGERY) |> 
+  group_by(PATIENT_ID) |> 
+  arrange(desc(START_DATE)) |> 
+  slice(1) |> 
+  ungroup() |> 
+  select(PATIENT_ID,
+         START_DATE,
+         DATE_FIRST_SURGERY,
+         TEST,
+         RESULT) |> 
+  mutate(DAYS_BEFORE_SURGERY = DATE_FIRST_SURGERY - START_DATE)
+
+data_labs_cea_clean <- data_labs_cea |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= DATE_FIRST_SURGERY) |> 
+  group_by(PATIENT_ID) |> 
+  arrange(desc(START_DATE)) |> 
+  slice(1) |> 
+  ungroup() |> 
+  select(PATIENT_ID,
+         START_DATE,
+         DATE_FIRST_SURGERY,
+         TEST,
+         RESULT) |> 
+  mutate(DAYS_BEFORE_SURGERY = DATE_FIRST_SURGERY - START_DATE)
+
+data_labs_psa_clean <- data_labs_psa |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= DATE_FIRST_SURGERY) |> 
+  group_by(PATIENT_ID) |> 
+  arrange(desc(START_DATE)) |> 
+  slice(1) |> 
+  ungroup() |> 
+  select(PATIENT_ID,
+         START_DATE,
+         DATE_FIRST_SURGERY,
+         TEST,
+         RESULT) |> 
+  mutate(DAYS_BEFORE_SURGERY = DATE_FIRST_SURGERY - START_DATE)
+
+data_labs_clean <- rbind(data_labs_ca_15_3_clean,
+                         data_labs_ca_19_9_clean,
+                         data_labs_cea_clean,
+                         data_labs_psa_clean)
+
+write_tsv(x = data_labs_clean,
+          file = "../data/03_data_labs_clean.tsv")
+```
+
+### Distribution
+
+```{r}
+#| label: distribution_labs
+
+p1 <- data_labs_clean |> 
+  filter(TEST == "CA_15-3") |> 
+  ggplot(mapping = aes(x = DAYS_BEFORE_SURGERY)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = str_c("Number of CA 15-3 tests: ", 
+                     nrow(data_labs_ca_15_3_clean),
+                     " (",
+                     round(nrow(data_labs_ca_15_3_clean)/nrow(data_clinical_patient)*100, 2),
+                     "%)"),
+       x = "Days before surgery", 
+       y = "Number of patients tested") +
+  theme_minimal()
+
+p2 <- data_labs_clean |> 
+  filter(TEST == "CA_19-9") |> 
+  ggplot(mapping = aes(x = DAYS_BEFORE_SURGERY)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = str_c("Number of CA 19-9 tests: ", 
+                     nrow(data_labs_ca_19_9_clean),
+                     " (",
+                     round(nrow(data_labs_ca_19_9_clean)/nrow(data_clinical_patient)*100, 2),
+                     "%)"),
+       x = "Days before surgery", 
+       y = "Number of patients tested") +
+  theme_minimal()
+
+p3 <- data_labs_clean |> 
+  filter(TEST == "CEA") |> 
+  ggplot(mapping = aes(x = DAYS_BEFORE_SURGERY)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = str_c("Number of CEA tests: ", 
+                     nrow(data_labs_cea_clean),
+                     " (",
+                     round(nrow(data_labs_cea_clean)/nrow(data_clinical_patient)*100, 2),
+                     "%)"),
+       x = "Days before surgery", 
+       y = "Number of patients tested") +
+  theme_minimal()
+
+p4 <- data_labs_clean |> 
+  filter(TEST == "PSA") |> 
+  ggplot(mapping = aes(x = DAYS_BEFORE_SURGERY)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = str_c("Number of PSA tests: ", 
+                     nrow(data_labs_psa_clean),
+                     " (",
+                     round(nrow(data_labs_psa_clean)/nrow(data_clinical_patient)*100, 2),
+                     "%)"),
+       x = "Days before surgery", 
+       y = "Number of patients tested") +
+  theme_minimal()
+
+(p1 + p2) / (p3 + p4)
+```
+
+## Most recent tumor data
+
+### Clean the data
+
+```{r}
+#| label: clean_tumor_data
+
+data_tumor_gleason_clean <- data_tumor_gleason |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= DATE_FIRST_SURGERY) |> 
+  group_by(PATIENT_ID) |> 
+  arrange(desc(START_DATE)) |> 
+  slice(1) |> 
+  ungroup() |> 
+  select(PATIENT_ID,
+         START_DATE,
+         DATE_FIRST_SURGERY,
+         TEST = SUBTYPE,
+         RESULT = GLEASON_SCORE) |> 
+  mutate(DAYS_BEFORE_SURGERY = DATE_FIRST_SURGERY - START_DATE)
+
+data_tumor_mmr_clean <- data_tumor_mmr |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= DATE_FIRST_SURGERY) |> 
+  group_by(PATIENT_ID) |> 
+  arrange(desc(START_DATE)) |> 
+  slice(1) |> 
+  ungroup() |> 
+  select(PATIENT_ID,
+         START_DATE,
+         DATE_FIRST_SURGERY,
+         TEST = SUBTYPE,
+         RESULT = MMR_ABSENT) |> 
+  mutate(DAYS_BEFORE_SURGERY = DATE_FIRST_SURGERY - START_DATE)
+
+data_tumor_pdl1_clean <- data_tumor_pdl1 |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= DATE_FIRST_SURGERY) |> 
+  group_by(PATIENT_ID) |> 
+  arrange(desc(START_DATE)) |> 
+  slice(1) |> 
+  ungroup() |> 
+  select(PATIENT_ID,
+         START_DATE,
+         DATE_FIRST_SURGERY,
+         TEST = SUBTYPE,
+         RESULT = PDL1_POSITIVE) |> 
+  mutate(DAYS_BEFORE_SURGERY = DATE_FIRST_SURGERY - START_DATE)
+
+data_tumor_site_clean <- data_tumor_site |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= DATE_FIRST_SURGERY) |> 
+  group_by(PATIENT_ID) |> 
+  arrange(desc(START_DATE)) |> 
+  slice(1) |> 
+  ungroup() |> 
+  select(PATIENT_ID,
+         START_DATE,
+         DATE_FIRST_SURGERY,
+         TEST = SUBTYPE,
+         RESULT = TUMOR_SITE) |> 
+  mutate(DAYS_BEFORE_SURGERY = DATE_FIRST_SURGERY - START_DATE)
+
+data_tumor_clean <- rbind(data_tumor_gleason_clean,
+                         data_tumor_mmr_clean,
+                         data_tumor_pdl1_clean,
+                         data_tumor_site_clean)
+
+write_tsv(x = data_tumor_clean,
+          file = "../data/03_data_tumor_clean.tsv")
+```
+
+### Distribution
+
+```{r}
+#| label: distribution_tumor_data
+
+p1 <- data_tumor_clean |> 
+  filter(TEST == "Gleason Score") |> 
+  ggplot(mapping = aes(x = DAYS_BEFORE_SURGERY)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = str_c("Number of Gleason scores: ", 
+                     nrow(data_tumor_gleason_clean),
+                     " (",
+                     round(nrow(data_tumor_gleason_clean)/nrow(data_clinical_patient)*100, 2),
+                     "%)"),
+       x = "Days before surgery", 
+       y = "Number of patients tested") +
+  theme_minimal()
+
+p2 <- data_tumor_clean |> 
+  filter(TEST == "MMR (IHC)") |> 
+  ggplot(mapping = aes(x = DAYS_BEFORE_SURGERY)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = str_c("Number of MMR tests: ", 
+                     nrow(data_tumor_mmr_clean),
+                     " (",
+                     round(nrow(data_tumor_mmr_clean)/nrow(data_clinical_patient)*100, 2),
+                     "%)"),
+       x = "Days before surgery", 
+       y = "Number of patients tested") +
+  theme_minimal()
+
+p3 <- data_tumor_clean |> 
+  filter(TEST == "PD-L1 Positive") |> 
+  ggplot(mapping = aes(x = DAYS_BEFORE_SURGERY)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = str_c("Number of PD-L1 tests: ", 
+                     nrow(data_tumor_pdl1_clean),
+                     " (",
+                     round(nrow(data_tumor_pdl1_clean)/nrow(data_clinical_patient)*100, 2),
+                     "%)"),
+       x = "Days before surgery", 
+       y = "Number of patients tested") +
+  theme_minimal()
+
+p4 <- data_tumor_clean |> 
+  filter(TEST == "Tumor Sites") |> 
+  ggplot(mapping = aes(x = DAYS_BEFORE_SURGERY)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = str_c("Number of tumor sites: ", 
+                     nrow(data_tumor_site_clean),
+                     " (",
+                     round(nrow(data_tumor_site_clean)/nrow(data_clinical_patient)*100, 2),
+                     "%)"),
+       x = "Days before surgery", 
+       y = "Number of patients tested") +
+  theme_minimal()
+
+(p1 + p2) / (p3 + p4)
+```
+
+## Performance status (ECOG)
+
+### Clean the data
+
+```{r}
+#| label: clean_performance_status_data
+
+data_performance_status_clean <- data_performance_status |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= DATE_FIRST_SURGERY) |> 
+  group_by(PATIENT_ID) |> 
+  arrange(desc(START_DATE)) |> 
+  slice(1) |> 
+  ungroup() |> 
+  select(PATIENT_ID,
+         START_DATE,
+         DATE_FIRST_SURGERY,
+         ECOG) |> 
+  mutate(DAYS_BEFORE_SURGERY = DATE_FIRST_SURGERY - START_DATE)
+
+write_tsv(x = data_performance_status_clean,
+          file = "../data/03_data_performance_status_clean.tsv")
+```
+
+### Distribution
+
+```{r}
+#| label: distribution_performance_status
+
+p1 <- data_performance_status_clean |> 
+  ggplot(mapping = aes(x = DAYS_BEFORE_SURGERY)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = str_c("Patients with ECOG score: ", 
+                     nrow(data_performance_status_clean),
+                     " (",
+                     round(nrow(data_performance_status_clean)/nrow(data_clinical_patient)*100, 2),
+                     "%)"),
+       x = "Days before surgery", 
+       y = "Number of patients tested") +
+  theme_minimal()
+
+p2 <- data_performance_status_clean |> 
+  group_by(ECOG) |> 
+  summarise(n = n()) |> 
+  ggplot(mapping = aes(x = ECOG,
+                       y = n)) +
+  geom_col() +
+  labs(x = "ECOG score", 
+       y = "Number of patients") +
+  theme_minimal()
+
+p1 + p2
+```
+
+## Treatment history
+
+### Clean the data
+
+```{r}
+#| label: clean_treatment_history
+
+data_treatment_clean <- data_treatment |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= DATE_FIRST_SURGERY) |> 
+  select(PATIENT_ID,
+         START_DATE,
+         STOP_DATE,
+         DATE_FIRST_SURGERY,
+         TREATMENT = SUBTYPE,
+         AGENT) |> 
+  mutate(DAYS_BEFORE_SURGERY = DATE_FIRST_SURGERY - STOP_DATE)
+
+data_radiation_clean <- data_radiation |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= DATE_FIRST_SURGERY) |> 
+  select(PATIENT_ID,
+         START_DATE,
+         STOP_DATE,
+         DATE_FIRST_SURGERY,
+         TREATMENT = SUBTYPE) |> 
+  mutate(DAYS_BEFORE_SURGERY = DATE_FIRST_SURGERY - START_DATE, 
+         AGENT = NA)
+
+data_prior_meds_clean <- data_prior_meds |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= DATE_FIRST_SURGERY) |> 
+  select(PATIENT_ID,
+         START_DATE,
+         STOP_DATE,
+         DATE_FIRST_SURGERY,
+         TREATMENT = SUBTYPE) |> 
+  mutate(DAYS_BEFORE_SURGERY = DATE_FIRST_SURGERY - START_DATE,
+         AGENT = NA)
+
+data_treament_history_clean <- rbind(data_treatment_clean,
+                                     data_radiation_clean,
+                                     data_prior_meds_clean)
+
+write_tsv(x = data_treament_history_clean,
+          file = "../data/03_data_treament_history_clean.tsv")
+```
+
+### Distribution
+
+```{r}
+#| label: distribution_treatment_history
+
+p1 <- data_treament_history_clean |> 
+  filter(TREATMENT == "Chemo") |> 
+  group_by(PATIENT_ID) |> 
+  arrange(DAYS_BEFORE_SURGERY) |> 
+  slice(1) |> 
+  ungroup() |> 
+  ggplot(mapping = aes(x = DAYS_BEFORE_SURGERY)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = str_c("Patients with prior chemotherapy: ", 
+                     filter(data_treament_history_clean, TREATMENT == "Chemo") |> summarise(n = n_distinct(PATIENT_ID)) |>  pull(n),
+                     " (",
+                     round(filter(data_treament_history_clean, TREATMENT == "Chemo") |> summarise(n = n_distinct(PATIENT_ID)) |>  pull(n)/nrow(data_clinical_patient)*100, 2),
+                     "%)"),
+       x = "Days before surgery that most treament chemo round ended", 
+       y = "Number of patients") +
+  theme_minimal()
+
+p2 <- data_treament_history_clean |> 
+  filter(TREATMENT == "Biologic") |> 
+  group_by(PATIENT_ID) |> 
+  arrange(DAYS_BEFORE_SURGERY) |> 
+  slice(1) |> 
+  ungroup() |> 
+  ggplot(mapping = aes(x = DAYS_BEFORE_SURGERY)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = str_c("Patients with prior biological therapy: ", 
+                     filter(data_treament_history_clean, TREATMENT == "Biologic") |> summarise(n = n_distinct(PATIENT_ID)) |>  pull(n),
+                     " (",
+                     round(filter(data_treament_history_clean, TREATMENT == "Biologic") |> summarise(n = n_distinct(PATIENT_ID)) |>  pull(n)/nrow(data_clinical_patient)*100, 2),
+                     "%)"),
+       x = "Days before surgery that most recent treatment round ended", 
+       y = "Number of patients") +
+  theme_minimal()
+
+p3 <- data_treament_history_clean |> 
+  filter(TREATMENT == "Investigational") |> 
+  group_by(PATIENT_ID) |> 
+  arrange(DAYS_BEFORE_SURGERY) |> 
+  slice(1) |> 
+  ungroup() |> 
+  ggplot(mapping = aes(x = DAYS_BEFORE_SURGERY)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = str_c("Patients with prior investigational treament: ", 
+                     filter(data_treament_history_clean, TREATMENT == "Investigational") |> summarise(n = n_distinct(PATIENT_ID)) |>  pull(n),
+                     " (",
+                     round(filter(data_treament_history_clean, TREATMENT == "Investigational") |> summarise(n = n_distinct(PATIENT_ID)) |>  pull(n)/nrow(data_clinical_patient)*100, 2),
+                     "%)"),
+       x = "Days before surgery that most recent treament round ended", 
+       y = "Number of patients") +
+  theme_minimal()
+
+p4 <- data_treament_history_clean |> 
+  filter(TREATMENT == "Targeted") |> 
+  group_by(PATIENT_ID) |> 
+  arrange(DAYS_BEFORE_SURGERY) |> 
+  slice(1) |> 
+  ungroup() |> 
+  ggplot(mapping = aes(x = DAYS_BEFORE_SURGERY)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = str_c("Patients with prior targeted treament: ", 
+                     filter(data_treament_history_clean, TREATMENT == "Targeted") |> summarise(n = n_distinct(PATIENT_ID)) |>  pull(n),
+                     " (",
+                     round(filter(data_treament_history_clean, TREATMENT == "Targeted") |> summarise(n = n_distinct(PATIENT_ID)) |>  pull(n)/nrow(data_clinical_patient)*100, 2),
+                     "%)"),
+       x = "Days before surgery that most recent treatment round ended", 
+       y = "Number of patients") +
+  theme_minimal()
+
+p5 <- data_treament_history_clean |> 
+  filter(TREATMENT == "Bone Treatment") |> 
+  group_by(PATIENT_ID) |> 
+  arrange(DAYS_BEFORE_SURGERY) |> 
+  slice(1) |> 
+  ungroup() |> 
+  ggplot(mapping = aes(x = DAYS_BEFORE_SURGERY)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = str_c("Patients with prior bone treatment: ", 
+                     filter(data_treament_history_clean, TREATMENT == "Bone Treatment") |> summarise(n = n_distinct(PATIENT_ID)) |>  pull(n),
+                     " (",
+                     round(filter(data_treament_history_clean, TREATMENT == "Bone Treatment") |> summarise(n = n_distinct(PATIENT_ID)) |>  pull(n)/nrow(data_clinical_patient)*100, 2),
+                     "%)"),
+       x = "Days before surgery that most recent treatment round ended", 
+       y = "Number of patients") +
+  theme_minimal()
+
+p6 <- data_treament_history_clean |> 
+  filter(TREATMENT == "Hormone") |> 
+  group_by(PATIENT_ID) |> 
+  arrange(DAYS_BEFORE_SURGERY) |> 
+  slice(1) |> 
+  ungroup() |> 
+  ggplot(mapping = aes(x = DAYS_BEFORE_SURGERY)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = str_c("Patients with prior hormone treament: ", 
+                     filter(data_treament_history_clean, TREATMENT == "Hormone") |> summarise(n = n_distinct(PATIENT_ID)) |>  pull(n),
+                     " (",
+                     round(filter(data_treament_history_clean, TREATMENT == "Hormone") |> summarise(n = n_distinct(PATIENT_ID)) |>  pull(n)/nrow(data_clinical_patient)*100, 2),
+                     "%)"),
+       x = "Days before surgery that most recent treament round ended", 
+       y = "Number of patients") +
+  theme_minimal()
+
+p7 <- data_treament_history_clean |> 
+  filter(TREATMENT == "Immuno") |> 
+  group_by(PATIENT_ID) |> 
+  arrange(DAYS_BEFORE_SURGERY) |> 
+  slice(1) |> 
+  ungroup() |> 
+  ggplot(mapping = aes(x = DAYS_BEFORE_SURGERY)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = str_c("Patients with prior immunotherapy: ", 
+                     filter(data_treament_history_clean, TREATMENT == "Immuno") |> summarise(n = n_distinct(PATIENT_ID)) |>  pull(n),
+                     " (",
+                     round(filter(data_treament_history_clean, TREATMENT == "Immuno") |> summarise(n = n_distinct(PATIENT_ID)) |>  pull(n)/nrow(data_clinical_patient)*100, 2),
+                     "%)"),
+       x = "Days before surgery that most recent treatment round ended", 
+       y = "Number of patients") +
+  theme_minimal()
+
+p8 <- data_treament_history_clean |> 
+  filter(TREATMENT == "Radiation Therapy") |> 
+  group_by(PATIENT_ID) |> 
+  arrange(DAYS_BEFORE_SURGERY) |> 
+  slice(1) |> 
+  ungroup() |> 
+  ggplot(mapping = aes(x = DAYS_BEFORE_SURGERY)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = str_c("Patients with prior radiation: ", 
+                     filter(data_treament_history_clean, TREATMENT == "Radiation Therapy") |> summarise(n = n_distinct(PATIENT_ID)) |>  pull(n),
+                     " (",
+                     round(filter(data_treament_history_clean, TREATMENT == "Radiation Therapy") |> summarise(n = n_distinct(PATIENT_ID)) |>  pull(n)/nrow(data_clinical_patient)*100, 2),
+                     "%)"),
+       x = "Days before surgery that most recent treatment round ended", 
+       y = "Number of patients") +
+  theme_minimal()
+
+p9 <- data_treament_history_clean |> 
+  filter(TREATMENT == "Prior Medications to MSK") |> 
+  group_by(PATIENT_ID) |> 
+  arrange(DAYS_BEFORE_SURGERY) |> 
+  slice(1) |> 
+  ungroup() |> 
+  ggplot(mapping = aes(x = DAYS_BEFORE_SURGERY)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = str_c("Patients with prior medication to MSK: ", 
+                     filter(data_treament_history_clean, TREATMENT == "Prior Medications to MSK") |> summarise(n = n_distinct(PATIENT_ID)) |>  pull(n),
+                     " (",
+                     round(filter(data_treament_history_clean, TREATMENT == "Prior Medications to MSK") |> summarise(n = n_distinct(PATIENT_ID)) |>  pull(n)/nrow(data_clinical_patient)*100, 2),
+                     "%)"),
+       x = "Days before surgery that most recent treatment round ended", 
+       y = "Number of patients") +
+  theme_minimal()
+
+(p1 + p2 + p3) / (p4 + p5 + p6) / (p7 + p8 + p9)
+```
+
+# Genomic data
+
+## Copy number alterations data 
+
+### Clean the data
+
+```{r}
+#| label: clean_data_cna
+
+data_cna_clean <- data_cna |> 
+  pivot_longer(-Hugo_Symbol, 
+               names_to = "SAMPLE_ID",
+               values_to = "CNA") |> 
+  filter(SAMPLE_ID %in% data_clinical_sample$SAMPLE_ID) 
+
+write_tsv(x = data_cna_clean,
+          file = "../data/03_data_cna_clean.tsv")
+```
+
+### Distribution 
+
+```{r}
+#| label: distribution_cna
+
+data_cna_clean |> 
+  count(CNA) |> 
+  ggplot(mapping = aes(x = factor(CNA), 
+                        y = n, 
+                        fill = factor(CNA))) +
+  geom_col() +
+  geom_text(aes(label = n), 
+            vjust = -0.5) +
+  labs(x = "CNA state", 
+       y = "Count of calls") +
+  theme_minimal() +
+  scale_fill_manual(values = c("-2" = "blue4", 
+                               "-1.5" = "skyblue", 
+                               "0" = "grey80", 
+                               "2" = "red")) + 
+  theme(legend.position = "None")
+
+```
+
+### CNA burden per sample
+
+```{r}
+#| label: cna_per_sample
+
+data_cna_clean |> 
+  filter(!is.na(CNA) & CNA != 0)  |> 
+  count(SAMPLE_ID) |> 
+  group_by(n) |> 
+  summarise(samples_with_n_alterations = n()) |> 
+  ggplot(mapping = aes(x = n, 
+                       y = samples_with_n_alterations)) +
+  geom_col() +
+  labs(x = "N", 
+       y = "Number of samples with N alterations") + 
+  theme_minimal()
+```
+
+### Frequently altered genes
+
+```{r}
+#| label: cna_per_gene
+
+data_cna_clean |> 
+  filter(!is.na(CNA) & CNA != 0)  |> 
+  count(Hugo_Symbol) |> 
+  arrange(desc(n)) |> 
+  slice_head(n = 20) |> 
+  ggplot(mapping = aes(x = reorder(Hugo_Symbol, n), 
+                       y = n/nrow(data_clinical_sample)*100)) +
+  geom_col() +
+  labs(x = "Gene", 
+       y = "Number of altered samples (%)") + 
+  theme_minimal() + 
+  coord_flip()
+```
+
+### PCA
+
+```{r}
+#| label: cna_pca
+
+cna_matrix <- data_cna_clean |> 
+  pivot_wider(names_from = "Hugo_Symbol",
+              values_from = "CNA") |> 
+  column_to_rownames("SAMPLE_ID") |> 
+  as.matrix()
+
+cna_matrix[is.na(cna_matrix)] <- 0 
+
+gene_var <- apply(cna_matrix, 
+                  2, 
+                  var, 
+                  na.rm = TRUE)
+
+keep_genes_cna <- names(gene_var)[gene_var > 0]
+
+cna_matrix <- cna_matrix[, 
+                         keep_genes_cna, 
+                         drop = FALSE]
+
+pca_res <- prcomp(cna_matrix,
+                  scale. = TRUE,
+                  center = TRUE)
+
+pca_df <- as.data.frame(pca_res$x) |> 
+  rownames_to_column("SAMPLE_ID") |> 
+  inner_join(map_sample_patient,
+             by = join_by(SAMPLE_ID)) |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID))
+
+var_expl <- summary(pca_res)$importance
+
+pct1 <- round(100 * var_expl[2,1], 1)
+
+pct2 <- round(100 * var_expl[2,2], 1)
+
+p1 <- ggplot(data = pca_df, 
+       mapping = aes(x = PC1, 
+                     y = PC2,
+                     color = factor(OS_STATUS))) +
+  geom_point(size = 3, 
+             alpha = 0.8) +
+  labs(x = paste0("PC1 (", pct1, "%)"),
+       y = paste0("PC2 (", pct2, "%)"),
+       color = "OS") +
+  theme_minimal() + 
+  theme(legend.position = "top")
+
+p2 <- ggplot(data = pca_df, 
+       mapping = aes(x = PC1, 
+                     y = PC2,
+                     color = factor(DFS_STATUS))) +
+  geom_point(size = 3, 
+             alpha = 0.8) +
+  labs(x = paste0("PC1 (", pct1, "%)"),
+       y = paste0("PC2 (", pct2, "%)"),
+       color = "DFS") +
+  theme_minimal() + 
+  theme(legend.position = "top")
+
+p1 + p2
+```
+
+## Mutations data
+
+### Clean the data
+
+```{r}
+#| label: clean_data_mutations
+
+data_mutations_clean <- data_mutations |> 
+  select(SAMPLE_ID = Tumor_Sample_Barcode,
+         Hugo_Symbol,
+         Variant_Classification,
+         Variant_Type) |> 
+  filter(SAMPLE_ID %in% data_clinical_sample$SAMPLE_ID) |> 
+  group_by(SAMPLE_ID, Hugo_Symbol) |> 
+  slice(1) |> 
+  ungroup()
+
+write_tsv(x = data_mutations_clean,
+          file = "../data/03_data_mutations_clean.tsv")
+```
+
+### Distribution 
+
+```{r}
+#| label: distribution_mutations
+
+data_mutations_clean |> 
+  count(Variant_Type) |> 
+  ggplot(mapping = aes(x = Variant_Type, 
+                        y = n, 
+                        fill = Variant_Type)) +
+  geom_col() +
+  geom_text(aes(label = n), 
+            vjust = -0.5) +
+  labs(x = "Variant type", 
+       y = "Count of calls") +
+  theme_minimal() +
+  theme(legend.position = "None")
+
+data_mutations_clean |> 
+  count(Variant_Classification) |> 
+  ggplot(mapping = aes(x = Variant_Classification, 
+                        y = n, 
+                        fill = Variant_Classification)) +
+  geom_col() +
+  geom_text(aes(label = n), 
+            hjust = -0.5) +
+  labs(x = "Variant classification", 
+       y = "Count of calls") +
+  theme_minimal() +
+  theme(legend.position = "None") + 
+  coord_flip()
+```
+
+### Mutational burden per sample
+
+```{r}
+#| label: mutations_per_sample
+
+data_mutations_clean |> 
+  count(SAMPLE_ID) |> 
+  ggplot(mapping = aes(x = n)) +
+  geom_density() +
+  labs(x = "Mutations per sample", 
+       y = "Density") + 
+  theme_minimal()
+```
+
+### Frequently mutated genes
+
+```{r}
+#| label: mutated_gene
+
+data_mutations_clean |> 
+  count(Hugo_Symbol) |> 
+  arrange(desc(n)) |> 
+  slice_head(n = 20) |> 
+  ggplot(mapping = aes(x = reorder(Hugo_Symbol, n), 
+                       y = n/nrow(data_clinical_sample)*100)) +
+  geom_col() +
+  labs(x = "Gene", 
+       y = "Number of mutated samples (%)") + 
+  theme_minimal() + 
+  coord_flip()
+```
+
+### PCA
+
+```{r}
+#| label: mutations_pca
+
+mutations_matrix <- data_mutations_clean |> 
+  select(Hugo_Symbol,
+         SAMPLE_ID) |> 
+  mutate(value = 1) |> 
+  pivot_wider(names_from = "Hugo_Symbol",
+              values_from = "value",
+              values_fill = list(value = 0)) |> 
+  column_to_rownames("SAMPLE_ID") |> 
+  as.matrix()
+
+pca_res <- prcomp(mutations_matrix,
+                  scale. = TRUE,
+                  center = TRUE)
+
+pca_df <- as.data.frame(pca_res$x) |> 
+  rownames_to_column("SAMPLE_ID") |> 
+  inner_join(map_sample_patient,
+             by = join_by(SAMPLE_ID)) |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID))
+
+var_expl <- summary(pca_res)$importance
+
+pct1 <- round(100 * var_expl[2,1], 1)
+
+pct2 <- round(100 * var_expl[2,2], 1)
+
+p1 <- ggplot(data = pca_df, 
+       mapping = aes(x = PC1, 
+                     y = PC2,
+                     color = factor(OS_STATUS))) +
+  geom_point(size = 3, 
+             alpha = 0.8) +
+  labs(x = paste0("PC1 (", pct1, "%)"),
+       y = paste0("PC2 (", pct2, "%)"),
+       color = "OS") +
+  theme_minimal() + 
+  theme(legend.position = "top")
+
+p2 <- ggplot(data = pca_df, 
+       mapping = aes(x = PC1, 
+                     y = PC2,
+                     color = factor(DFS_STATUS))) +
+  geom_point(size = 3, 
+             alpha = 0.8) +
+  labs(x = paste0("PC1 (", pct1, "%)"),
+       y = paste0("PC2 (", pct2, "%)"),
+       color = "DFS") +
+  theme_minimal() + 
+  theme(legend.position = "top")
+
+p1 + p2
+```
+
+## Structural variants data
+
+### Clean the data
+
+```{r}
+#| label: clean_data_sv
+
+data_sv_clean <- data_sv |> 
+  select(SAMPLE_ID = Sample_Id,
+         Site1_Hugo_Symbol,
+         Site2_Hugo_Symbol,
+         Class) |> 
+  filter(SAMPLE_ID %in% data_clinical_sample$SAMPLE_ID)
+
+write_tsv(x = data_sv_clean,
+          file = "../data/03_data_sv_clean.tsv")
+```
+
+### Distribution 
+
+```{r}
+#| label: distribution_sv
+
+data_sv_clean |> 
+  count(Class) |> 
+  ggplot(mapping = aes(x = Class, 
+                        y = n, 
+                        fill = Class)) +
+  geom_col() +
+  geom_text(aes(label = n), 
+            vjust = -0.5) +
+  labs(x = "SV class", 
+       y = "Count of calls") +
+  theme_minimal() +
+  theme(legend.position = "None")
+```
+
+### Frequently alterd genes
+
+```{r}
+#| label: sv_gene
+
+data_sv_clean |> 
+  group_by(Class) |> 
+  count(Site1_Hugo_Symbol) |>
+  ungroup() |> 
+  mutate(value = 1) |> 
+  pivot_wider(names_from = Class,
+              values_from = "value",
+              values_fill = list(value = 0)) |> 
+  arrange(desc(n)) |> 
+  slice_head(n = 20) |> 
+  pivot_longer(cols = c("DELETION", "DUPLICATION", "INVERSION", "TRANSLOCATION", "NA"),
+               names_to = "Class",
+               values_to = "value") |> 
+  ggplot(mapping = aes(x = reorder(Site1_Hugo_Symbol, n), 
+                       y = n/nrow(data_clinical_sample)*100,
+                       fill = Class)) +
+  geom_col() +
+  labs(x = "Gene", 
+       y = "Number of SV samples (%)") + 
+  theme_minimal() + 
+  coord_flip()
+```
