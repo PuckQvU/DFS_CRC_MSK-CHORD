@@ -46,7 +46,7 @@ data_mutations <- read_tsv("../data/01_data_mutations.tsv")
 data_sv <- read_tsv("../data/01_data_sv.tsv")
 ```
 
-This project uses the Memorial Sloan Kettering clinicogenomic, harmonized oncologic real-world dataset (MSK-CHORD), published by [Jee *et al*. (2024)](https://doi.org/10.1038/s41586-024-08167-5 "Automated real-world data integration improves cancer outcome prediction"). The dataset is a collection of clinicogenomic data and structured real-world data (RWD), captured from unstructured medical texts using natural language processing (NLP). MSK-CHORD includes data from non-small-cell lung (n = 7,809), breast (n = 5,368), colorectal (n = 5,543), prostate (n = 3,211) and pancreatic (n = 3,109) cancers. 
+This project uses the Memorial Sloan Kettering clinicogenomic, harmonized oncologic real-world dataset (MSK-CHORD), published by [Jee *et al*. (2024)](https://doi.org/10.1038/s41586-024-08167-5 "Automated real-world data integration improves cancer outcome prediction"). The dataset is a collection of clinicogenomic data and structured real-world data (RWD), captured from unstructured medical texts using natural language processing (NLP). MSK-CHORD includes data from non-small-cell lung, breast, colorectal, prostate and pancreatic cancers. 
 
 The full MSK-CHORD dataset was downloaded from [cBioPortal](https://www.cbioportal.org/study/summary?id=msk_chord_2024 "cBioPortal: MSK-CHORD") on the 10th of June, 2025.
 
@@ -161,7 +161,7 @@ patients_included <- data_clinical_sample |>
 n_distinct(patients_included$PATIENT_ID)
 ```
 
-7. Based on the latest imaging that was done within 6 months after the surgery, patients whose scan indicated the presence of cancer were excluded, because that indicates that the surgery was not curative.
+7. If a patient had imaging data from the first 6 months after the surgery, patients whose most recent scan indicates the presence of cancer were excluded, because that indicates that the surgery was not curative.
 
 ```{r}
 #| label: not_cured
