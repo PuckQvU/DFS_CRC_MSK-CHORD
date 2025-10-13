@@ -7,11 +7,12 @@ format: html
 ```{r}
 #| label: packages
 #| message: false
+#| echo: false
 
 library("tidyverse")
 ```
 
-# Extract and list data files
+# Extract and list files in MSK-CHORD
 
 ```{r}
 #| label: list_files
@@ -27,7 +28,7 @@ readLines("../data/_raw/msk_chord_2024/Readme.txt")
 
 Every data set in this folder has a data file and an accompanying meta file.
 
-# Clean data
+# Load data
 
 ## clinical_patient
 
@@ -43,7 +44,7 @@ readLines("../data/_raw/msk_chord_2024/meta_clinical_patient.txt")
 
 head(data_clinical_patient) 
 
-# Need to remove 4 lines of column descriptions
+# Remove 4 rows of column descriptions
 data_clinical_patient <- read_delim("../data/_raw/msk_chord_2024/data_clinical_patient.txt", 
                                     delim = "\t", 
                                     skip = 4)
@@ -68,7 +69,7 @@ readLines("../data/_raw/msk_chord_2024/meta_clinical_sample.txt")
 
 head(data_clinical_sample) 
 
-# Need to remove 4 lines of column descriptions
+# Remove 4 rows of column descriptions
 data_clinical_sample <- read_delim("../data/_raw/msk_chord_2024/data_clinical_sample.txt",
                                    delim = "\t", 
                                    skip = 4)

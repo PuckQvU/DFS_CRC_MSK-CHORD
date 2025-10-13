@@ -1,8 +1,15 @@
 ---
-title: "Define and explore the cohort"
+title: "Define, prepare, and explore the cohort"
 author: "Puck Quarles van Ufford"
 format: html
 ---
+
+```{r}
+#| label: seed
+#| echo: false
+
+set.seed(8)
+```
 
 ```{r}
 #| label: packages
@@ -15,6 +22,7 @@ library("survminer")
 library("janitor")
 library("table1")
 library("knitr")
+library("rsample")
 ```
 
 ```{r}
@@ -45,10 +53,6 @@ data_cna <- read_tsv("../data/01_data_cna.tsv")
 data_mutations <- read_tsv("../data/01_data_mutations.tsv")
 data_sv <- read_tsv("../data/01_data_sv.tsv")
 ```
-
-This project uses the Memorial Sloan Kettering clinicogenomic, harmonized oncologic real-world dataset (MSK-CHORD), published by [Jee *et al*. (2024)](https://doi.org/10.1038/s41586-024-08167-5 "Automated real-world data integration improves cancer outcome prediction"). The dataset is a collection of clinicogenomic data and structured real-world data (RWD), captured from unstructured medical texts using natural language processing (NLP). MSK-CHORD includes data from non-small-cell lung, breast, colorectal, prostate and pancreatic cancers. 
-
-The full MSK-CHORD dataset was downloaded from [cBioPortal](https://www.cbioportal.org/study/summary?id=msk_chord_2024 "cBioPortal: MSK-CHORD") on the 10th of June, 2025.
 
 # Define inclusion and exclusion criteria
 
@@ -185,6 +189,8 @@ n_distinct(patients_included$PATIENT_ID)
 In this project, we will investigate the disease-free survival (DFS) and overall survival (OS) from 180 days after the day of the first surgery. Therefor, we must define the relevant survival events, namely recurrence (which can be indicated by imaging or treatment) and death.
 
 ```{r}
+#| label: define_survival_data
+
 # Recurrence (indicated by imaging)
 data_survival <- patients_included |> 
   left_join(data_timeline_cancer_presence, 
@@ -286,6 +292,8 @@ data_survival <- data_survival |>
 8. Only patients survived without recurrence or death for 180 days after the surgery were included.
 
 ```{r}
+#| label: exclude_no_DFS_180_days
+
 patients_included <- data_survival |> 
   mutate(survived_6_months = case_when(OS_STATUS == 1 ~ DAYS_TO_OS_EVENT > 180,
                                        TRUE ~ TRUE),
@@ -299,21 +307,49 @@ patients_included <- data_survival |>
 n_distinct(patients_included$PATIENT_ID)
 ```
 
-Total number of patients included:
+# Split the data
+
+The data will be split 80/20 into a training and testing set, controlling for their survival status.
 
 ```{r}
-#| label: patients_included
+#| label: split_data
 #| echo: false
 
-cat(nrow(patients_included))
+split <- patients_included |> 
+  mutate(strata = interaction(OS_STATUS,
+                              DFS_STATUS)) |> 
+  initial_split(prop = 0.8, 
+                strata = strata)
+
+data_train <- training(split) |> 
+  select(-strata)
+
+data_test <- testing(split) |> 
+  select(-strata)
+
+write_tsv(x = data_train,
+          file = "../data/02_data_train.tsv")
+
+write_tsv(x = data_test,
+          file = "../data/02_data_test.tsv")
+
+print(str_c("# patients in training set: ", nrow(data_train)))
+print(str_c("# patients in test set: ", nrow(data_test)))
+
+data_train <- data_train |> 
+  mutate(split = "Train")
+
+data_test <- data_test |> 
+  mutate(split = "Test") 
+
+patients_included <- bind_rows(data_train, 
+                               data_test)
 
 write_tsv(x = patients_included,
           file = "../data/02_patients_included.tsv")
 ```
 
 # Explore the cohort data
-
-The next section provides an overview of the different features that are captured in the data.
 
 ## Survival
 
@@ -324,13 +360,14 @@ The next section provides an overview of the different features that are capture
 #| message: false
 
 patients_included |> 
-  group_by(OS_STATUS) |> 
+  group_by(split,
+           OS_STATUS) |> 
   summarise(n(), 
             mean(YEARS_TO_OS_EVENT)) |> 
   kable(digits = 2)
 
 fit_OS <- survfit(Surv(YEARS_TO_OS_EVENT, 
-                       OS_STATUS) ~ 1, 
+                       OS_STATUS) ~ split, 
                   data = patients_included)
 
 ggsurvplot(
@@ -344,20 +381,23 @@ ggsurvplot(
   break.time.by = 2,
   legend = "none",
   risk.table = T,
-  surv.median.line = "hv"
+  surv.median.line = "hv",
+  pval = TRUE,
+  pval.method = TRUE
 ) 
 
 ggsave("../results/02_KM_OS.png")
 
 
 patients_included |> 
-  group_by(DFS_STATUS) |> 
+  group_by(split,
+           DFS_STATUS) |> 
   summarise(n(), 
             mean(YEARS_TO_DFS_EVENT)) |> 
   kable(digits = 2)
 
 fit_DFS <- survfit(Surv(YEARS_TO_DFS_EVENT, 
-                        DFS_STATUS) ~ 1, 
+                        DFS_STATUS) ~ split, 
                    data = patients_included)
 
 ggsurvplot(
@@ -371,7 +411,9 @@ ggsurvplot(
   break.time.by = 2,
   legend = "none",
   risk.table = T,
-  surv.median.line = "hv"
+  surv.median.line = "hv",
+  pval = TRUE,
+  pval.method = TRUE
 ) 
 
 ggsave("../results/02_KM_DFS.png")
@@ -457,7 +499,8 @@ table1(~ ONCOTREE_CODE +
          TUMOR_PURITY +
          MSI_SCORE +
          MSI_TYPE +
-         TMB_NONSYNONYMOUS,
+         TMB_NONSYNONYMOUS |
+         split,
        data = data_clinical_sample_clean)
 ```
 
@@ -549,7 +592,8 @@ table1(~ GENDER +
          STAGE_HIGHEST_RECORDED +
          NUM_ICDO_DX +
          SMOKING_STATUS_NLP +
-         PRIOR_MED_NLP,
+         PRIOR_MED_NLP |
+         split,
        data = data_clinical_patient_clean)
 ```
 
@@ -581,11 +625,21 @@ Fraction of patients in the cohort with ECOG scores:
 #| label: patients_performance_status
 #| echo: false
 
-cat(str_c(round(data_timeline_performance_status_clean |> 
-                  pull(PATIENT_ID) |> 
-                  n_distinct()/nrow(patients_included)*100,
-                digits = 1),
-          "%"))
+str_c("Training set: ", 
+      round(data_timeline_performance_status_clean |>
+              filter(split == "Train") |> 
+              pull(PATIENT_ID) |> 
+              n_distinct()/nrow(data_train)*100,
+            digits = 1),
+      "%")
+
+str_c("Test set: ", 
+      round(data_timeline_performance_status_clean |>
+              filter(split == "Test") |> 
+              pull(PATIENT_ID) |> 
+              n_distinct()/nrow(data_test)*100,
+            digits = 1),
+      "%")
 ```
 
 Number of ECOG scores per patient:
@@ -596,9 +650,11 @@ Number of ECOG scores per patient:
 #| warning: false
 
 data_timeline_performance_status_clean |> 
-  group_by(PATIENT_ID) |> 
+  group_by(split, 
+           PATIENT_ID) |> 
   summarise(n = n()) |> 
   ungroup() |> 
+  group_by(split) |> 
   summarise(mean = mean(n),
             sd = sd(n),
             median = median(n)) |> 
@@ -622,7 +678,8 @@ data_timeline_performance_status_clean |>
   labs(x = "ECOG score",
        y = "n patients") + 
   theme_minimal() +
-  theme(legend.position = "None")
+  theme(legend.position = "None") + 
+  facet_wrap(~ split)
 ```
 
 ## Labs
@@ -654,11 +711,21 @@ Fraction of patients in the cohort with CEA labs:
 #| label: patients_cea_labs
 #| echo: false
 
-cat(str_c(round(data_timeline_cea_labs_clean |> 
-                  pull(PATIENT_ID) |> 
-                  n_distinct()/nrow(patients_included)*100,
-                digits = 1),
-          "%"))
+str_c("Training set: ", 
+      round(data_timeline_cea_labs_clean |>
+              filter(split == "Train") |> 
+              pull(PATIENT_ID) |> 
+              n_distinct()/nrow(data_train)*100,
+            digits = 1),
+      "%")
+
+str_c("Test set: ", 
+      round(data_timeline_cea_labs_clean |>
+              filter(split == "Test") |> 
+              pull(PATIENT_ID) |> 
+              n_distinct()/nrow(data_test)*100,
+            digits = 1),
+      "%")
 ```
 
 Number of CEA labs per patient:
@@ -669,9 +736,11 @@ Number of CEA labs per patient:
 #| warning: false
 
 data_timeline_cea_labs_clean |> 
-  group_by(PATIENT_ID) |> 
+  group_by(split,
+           PATIENT_ID) |> 
   summarise(n = n()) |> 
   ungroup() |> 
+  group_by(split) |> 
   summarise(mean = mean(n),
             sd = sd(n),
             median = median(n)) |> 
@@ -693,7 +762,8 @@ data_timeline_cea_labs_clean |>
   ggplot(mapping = aes(x = RESULT)) + 
   geom_histogram(binwidth = 10) +
   labs(x = "CEA level (ng/ml)") + 
-  theme_minimal() 
+  theme_minimal() +
+  facet_wrap(~ split)
 
 data_timeline_cea_labs_clean |> 
   group_by(PATIENT_ID) |> 
@@ -706,7 +776,9 @@ data_timeline_cea_labs_clean |>
   labs(x = "CEA level (ng/ml)") + 
   theme_minimal() + 
   theme(axis.text.y = element_blank(), 
-        axis.ticks.y = element_blank())
+        axis.ticks.y = element_blank()) +
+  facet_wrap(~ split)
+
 ```
 
 ## Radiology
@@ -766,7 +838,8 @@ table1(~ SOURCE_SPECIFIC +
          ABDOMEN +
          PELVIS + 
          HEAD +
-         OTHER,
+         OTHER |
+         split,
        data = data_timeline_tumor_site_clean)
 ```
 
@@ -799,11 +872,21 @@ Fraction of patients in the cohort with an MMR status:
 #| label: patients_mmr_status
 #| echo: false
 
-cat(str_c(round(data_timeline_mmr_clean |> 
-                  pull(PATIENT_ID) |> 
-                  n_distinct()/nrow(patients_included)*100,
-                digits = 1),
-          "%"))
+str_c("Training set: ", 
+      round(data_timeline_mmr_clean |>
+              filter(split == "Train") |> 
+              pull(PATIENT_ID) |> 
+              n_distinct()/nrow(data_train)*100,
+            digits = 1),
+      "%")
+
+str_c("Test set: ", 
+      round(data_timeline_mmr_clean |>
+              filter(split == "Test") |> 
+              pull(PATIENT_ID) |> 
+              n_distinct()/nrow(data_test)*100,
+            digits = 1),
+      "%")
 ```
 
 Number of MMR assessments per patient:
@@ -814,9 +897,11 @@ Number of MMR assessments per patient:
 #| warning: false
 
 data_timeline_mmr_clean |> 
-  group_by(PATIENT_ID) |> 
+  group_by(split,
+           PATIENT_ID) |> 
   summarise(n = n()) |> 
   ungroup() |> 
+  group_by(split) |> 
   summarise(mean = mean(n),
             sd = sd(n),
             median = median(n)) |> 
@@ -840,7 +925,8 @@ data_timeline_mmr_clean |>
   labs(x = "MMR absent",
        y = "n patients") + 
   theme_minimal() +
-  theme(legend.position = "None")
+  theme(legend.position = "None") + 
+  facet_wrap(~ split)
 ```
 
 ## Treatment history
@@ -859,7 +945,8 @@ data_timeline_treatment_clean <- data_timeline_treatment |>
          STOP_DATE,
          SURGERY_DATE,
          TREATMENT = SUBTYPE,
-         AGENT) |> 
+         AGENT,
+         split) |> 
   mutate(DAYS_BEFORE_SURGERY = SURGERY_DATE - STOP_DATE)
 
 data_timeline_radiation_clean <- data_timeline_radiation |> 
@@ -870,7 +957,8 @@ data_timeline_radiation_clean <- data_timeline_radiation |>
          START_DATE,
          STOP_DATE,
          SURGERY_DATE,
-         TREATMENT = SUBTYPE) |> 
+         TREATMENT = SUBTYPE,
+         split) |> 
   mutate(DAYS_BEFORE_SURGERY = SURGERY_DATE - START_DATE, 
          AGENT = NA)
 
@@ -882,7 +970,8 @@ data_timeline_prior_meds_clean <- data_timeline_prior_meds |>
          START_DATE,
          STOP_DATE,
          SURGERY_DATE,
-         TREATMENT = SUBTYPE) |> 
+         TREATMENT = SUBTYPE,
+         split) |> 
   mutate(DAYS_BEFORE_SURGERY = SURGERY_DATE - START_DATE,
          AGENT = NA)
 
@@ -900,12 +989,23 @@ Fraction of patients in the cohort who started treatment before surgery:
 #| label: patients_treatment_history_before
 #| echo: false
 
-cat(str_c(round(data_treament_history_clean |> 
-                  filter(START_DATE <= SURGERY_DATE) |> 
-                  pull(PATIENT_ID) |> 
-                  n_distinct()/nrow(patients_included)*100,
-                digits = 1),
-          "%"))
+str_c("Training set: ", 
+      round(data_treament_history_clean |>
+              filter(START_DATE <= SURGERY_DATE,
+                     split == "Train") |> 
+              pull(PATIENT_ID) |> 
+              n_distinct()/nrow(data_train)*100,
+            digits = 1),
+      "%")
+
+str_c("Test set: ", 
+      round(data_treament_history_clean |>
+              filter(START_DATE <= SURGERY_DATE,
+                     split == "Test") |> 
+              pull(PATIENT_ID) |> 
+              n_distinct()/nrow(data_test)*100,
+            digits = 1),
+      "%")
 ```
 
 Fraction of patients in the cohort who started treatment within 6 months after surgery:
@@ -914,12 +1014,23 @@ Fraction of patients in the cohort who started treatment within 6 months after s
 #| label: patients_treatment_history_after
 #| echo: false
 
-cat(str_c(round(data_treament_history_clean |> 
-                  filter(START_DATE > SURGERY_DATE) |> 
-                  pull(PATIENT_ID) |> 
-                  n_distinct()/nrow(patients_included)*100,
-                digits = 1),
-          "%"))
+str_c("Training set: ", 
+      round(data_treament_history_clean |>
+              filter(START_DATE > SURGERY_DATE,
+                     split == "Train") |> 
+              pull(PATIENT_ID) |> 
+              n_distinct()/nrow(data_train)*100,
+            digits = 1),
+      "%")
+
+str_c("Test set: ", 
+      round(data_treament_history_clean |>
+              filter(START_DATE > SURGERY_DATE,
+                     split == "Test") |> 
+              pull(PATIENT_ID) |> 
+              n_distinct()/nrow(data_test)*100,
+            digits = 1),
+      "%")
 ```
 
 Number of patients receiving different types of treatment (a patient can be included in multiple categories):
@@ -940,7 +1051,8 @@ data_treament_history_clean |>
        y = "n patients") + 
   theme_minimal() +
   theme(legend.position = "None",
-        axis.text.x = element_text(angle = 45, hjust = 1)) 
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_wrap(~ split)
 ```
 
 ## Genomic data
@@ -955,7 +1067,8 @@ data_cna_clean <- data_cna |>
   pivot_longer(-Hugo_Symbol, 
                names_to = "SAMPLE_ID",
                values_to = "CNA") |> 
-  filter(SAMPLE_ID %in% patients_included$SAMPLE_ID) 
+  right_join(patients_included,
+             by = join_by(SAMPLE_ID))
 
 write_tsv(x = data_cna_clean,
           file = "../data/02_data_cna_clean.tsv")
@@ -974,6 +1087,7 @@ cna_labels <- tibble(
 )
 
 data_cna_clean |> 
+  group_by(split) |> 
   count(CNA) |> 
   left_join(cna_labels, by = "CNA") |> 
   ggplot(aes(x = factor(CNA), 
@@ -989,8 +1103,8 @@ data_cna_clean |>
                                "-1.5" = "skyblue", 
                                "0" = "grey80", 
                                "2" = "red")) + 
-  theme(legend.position = "None")
-
+  theme(legend.position = "None") +
+  facet_wrap(~ split)
 ```
 
 CNA burden per sample:
@@ -998,18 +1112,23 @@ CNA burden per sample:
 ```{r}
 #| label: cna_per_sample
 #| echo: false
+#| warning: false
+#| message: false
 
 data_cna_clean |> 
   filter(!is.na(CNA) & CNA != 0)  |> 
+  group_by(split) |> 
   count(SAMPLE_ID) |> 
-  group_by(n) |> 
+  group_by(split,
+           n) |> 
   summarise(samples_with_n_alterations = n()) |> 
   ggplot(mapping = aes(x = n, 
                        y = samples_with_n_alterations)) +
   geom_col() +
   labs(x = "N", 
        y = "Number of samples with N copy number alterations") + 
-  theme_minimal()
+  theme_minimal() + 
+  facet_wrap(~ split)
 ```
 
 Most frequently altered genes:
@@ -1020,6 +1139,7 @@ Most frequently altered genes:
 
 data_cna_clean |> 
   filter(!is.na(CNA) & CNA != 0)  |> 
+  group_by(split) |> 
   count(Hugo_Symbol) |> 
   arrange(desc(n)) |> 
   slice_head(n = 20) |> 
@@ -1029,7 +1149,8 @@ data_cna_clean |>
   labs(x = "Gene", 
        y = "Number of altered samples (%)") + 
   theme_minimal() + 
-  coord_flip()
+  coord_flip() + 
+  facet_wrap(~ split)
 ```
 
 ### Mutations
@@ -1043,7 +1164,8 @@ data_mutations_clean <- data_mutations |>
          Hugo_Symbol,
          Variant_Classification,
          Variant_Type) |> 
-  filter(SAMPLE_ID %in% patients_included$SAMPLE_ID) |> 
+  right_join(patients_included,
+             by = join_by(SAMPLE_ID)) |> 
   group_by(SAMPLE_ID, Hugo_Symbol) |> 
   slice(1) |> 
   ungroup()
@@ -1059,6 +1181,7 @@ Distribution of mutation types in the data:
 #| echo: false
 
 data_mutations_clean |> 
+  group_by(split) |> 
   count(Variant_Type) |> 
   ggplot(mapping = aes(x = Variant_Type, 
                         y = n, 
@@ -1069,9 +1192,11 @@ data_mutations_clean |>
   labs(x = "Variant type", 
        y = "Count of calls") +
   theme_minimal() +
-  theme(legend.position = "None")
+  theme(legend.position = "None") + 
+  facet_wrap(~ split)
 
 data_mutations_clean |> 
+  group_by(split) |> 
   count(Variant_Classification) |> 
   ggplot(mapping = aes(x = Variant_Classification, 
                         y = n, 
@@ -1083,7 +1208,8 @@ data_mutations_clean |>
        y = "Count of calls") +
   theme_minimal() +
   theme(legend.position = "None") + 
-  coord_flip()
+  coord_flip() + 
+  facet_wrap(~ split)
 ```
 
 Mutational burden per sample
@@ -1093,12 +1219,14 @@ Mutational burden per sample
 #| echo: false
 
 data_mutations_clean |> 
+  group_by(split) |> 
   count(SAMPLE_ID) |> 
   ggplot(mapping = aes(x = n)) +
   geom_density() +
   labs(x = "Mutations per sample", 
        y = "Density") + 
-  theme_minimal()
+  theme_minimal() + 
+  facet_wrap(~ split)
 ```
 
 Most frequently mutated genes:
@@ -1108,6 +1236,7 @@ Most frequently mutated genes:
 #| echo: false
 
 data_mutations_clean |> 
+  group_by(split) |> 
   count(Hugo_Symbol) |> 
   arrange(desc(n)) |> 
   slice_head(n = 20) |> 
@@ -1117,7 +1246,8 @@ data_mutations_clean |>
   labs(x = "Gene", 
        y = "Number of mutated samples (%)") + 
   theme_minimal() + 
-  coord_flip()
+  coord_flip() + 
+  facet_wrap(~ split)
 ```
 
 ### Structural variants
@@ -1131,19 +1261,21 @@ data_sv_clean <- data_sv |>
          Site1_Hugo_Symbol,
          Site2_Hugo_Symbol,
          Class) |> 
-  filter(SAMPLE_ID %in% patients_included$SAMPLE_ID)
+  inner_join(patients_included,
+             by = join_by(SAMPLE_ID))
 
 write_tsv(x = data_sv_clean,
           file = "../data/02_data_sv_clean.tsv")
 ```
 
-Distribution of structural varaints in the data:
+Distribution of structural variants in the data:
 
 ```{r}
 #| label: distribution_sv
 #| echo: false
 
 data_sv_clean |> 
+  group_by(split) |> 
   count(Class) |> 
   ggplot(mapping = aes(x = Class, 
                         y = n, 
@@ -1154,7 +1286,8 @@ data_sv_clean |>
   labs(x = "SV class", 
        y = "Count of calls") +
   theme_minimal() +
-  theme(legend.position = "None")
+  theme(legend.position = "None") + 
+  facet_wrap(~ split)
 ```
 
 Most frequently altered genes:
@@ -1178,7 +1311,6 @@ data_sv_clean |>
   labs(x = "Gene", 
        y = "Number of structural variants in the data") + 
   theme_minimal() + 
-  coord_flip() 
+  coord_flip()  + 
+  facet_wrap(~ split)
 ```
-
-
