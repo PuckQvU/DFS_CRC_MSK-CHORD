@@ -1314,3 +1314,279 @@ data_sv_clean |>
   coord_flip()  + 
   facet_wrap(~ split)
 ```
+
+# Combine and save data
+
+The combined training and testing data contains one row per patient and the following columns:
+
+- The columns from the clinical sample and patient data.
+- Columns containing the latest ECOG score, CEA level and MMR assessment in the +- 180 day window around the surgery.
+- A summary of all tumor site data in the 180 day window, where there is one column for each tumor site in the data, with a 1 if it was detected in a patient at any point in that window, and a 0 if not.
+- A summary of the treatment history, with a column per treatment type and a 1 if the patient has a history of that treatment or a 0 if not.
+- A summary of the CNA, mutations and SV data, with one column per gene. The columns indicate the type of genomic data with the prefixes CNA_, Mut_ and SV_, respectively.
+
+```{r}
+#| label: summarize_data_per_patient
+#| echo: false
+
+data_timeline_tumor_site_summary <- data_timeline_tumor_site_clean |> 
+  group_by(PATIENT_ID) |> 
+  summarize(
+    CHEST   = as.integer(any(CHEST == 1)),
+    ABDOMEN = as.integer(any(ABDOMEN == 1)),
+    PELVIS  = as.integer(any(PELVIS == 1)),
+    HEAD    = as.integer(any(HEAD == 1)),
+    OTHER   = as.integer(any(OTHER == 1)),
+    .groups = "drop"
+  )  |> 
+  left_join(data_timeline_tumor_site_clean |> 
+              distinct(PATIENT_ID, TUMOR_SITE) |> 
+              mutate(has_site = 1) |> 
+              pivot_wider(names_from = TUMOR_SITE,
+                          values_from = has_site,
+                          values_fill = 0),
+            by = join_by(PATIENT_ID))
+
+data_treament_history_summary <- data_treament_history_clean |> 
+  select(- c(AGENT,
+             SURGERY_DATE,
+             START_DATE,
+             STOP_DATE,
+             DAYS_BEFORE_SURGERY,
+             split)) |> 
+  distinct(PATIENT_ID, TREATMENT, .keep_all = TRUE) |> 
+  mutate(has_treatment = 1) |> 
+  pivot_wider(id_cols = c(PATIENT_ID, everything()),
+              names_from = TREATMENT,
+              values_from = has_treatment,
+              values_fill = 0) 
+
+data_cna_summary <- data_cna_clean |> 
+  select(PATIENT_ID, 
+         Hugo_Symbol, 
+         CNA) |> 
+  pivot_wider(names_from = Hugo_Symbol,
+              values_from = CNA,
+              names_prefix = "CNA_")
+
+data_mutations_summary <- data_mutations_clean |> 
+  select(PATIENT_ID, 
+         Hugo_Symbol,
+         Variant_Classification) |> 
+  pivot_wider(names_from = Hugo_Symbol,
+              values_from = Variant_Classification,
+              names_prefix = "Mut_")
+
+data_sv_summary <- data_sv_clean |> 
+  select(PATIENT_ID, 
+         Site1_Hugo_Symbol, 
+         Class) |> 
+  pivot_wider(names_from = Site1_Hugo_Symbol,
+              values_from = Class,
+              names_prefix = "SV_")
+```
+
+```{r}
+#| label: combine_data
+#| echo: false
+
+data_train_complete <- data_train |> 
+  left_join(data_clinical_sample_clean,
+            by = join_by(PATIENT_ID, 
+                         SAMPLE_ID, 
+                         SURGERY_DATE, 
+                         SAMPLE_DATE,
+                         OS_STATUS, 
+                         DAYS_TO_OS_EVENT, 
+                         YEARS_TO_OS_EVENT, 
+                         DFS_STATUS, 
+                         DAYS_TO_DFS_EVENT,
+                         YEARS_TO_DFS_EVENT, 
+                         split)) |> 
+  left_join(data_clinical_patient_clean,
+            by = join_by(PATIENT_ID, 
+                         SAMPLE_ID, 
+                         SURGERY_DATE, 
+                         SAMPLE_DATE,
+                         DAYS_TO_OS_EVENT, 
+                         YEARS_TO_OS_EVENT, 
+                         DFS_STATUS, 
+                         DAYS_TO_DFS_EVENT,
+                         YEARS_TO_DFS_EVENT, 
+                         split)) |> 
+  select(- c(OS_MONTHS,
+             OS_STATUS.x,
+             OS_STATUS.y)) |> 
+  left_join(data_timeline_performance_status_clean,
+            by = join_by(PATIENT_ID, 
+                         SAMPLE_ID, 
+                         SURGERY_DATE, 
+                         SAMPLE_DATE,
+                         OS_STATUS, 
+                         DAYS_TO_OS_EVENT, 
+                         YEARS_TO_OS_EVENT, 
+                         DFS_STATUS, 
+                         DAYS_TO_DFS_EVENT,
+                         YEARS_TO_DFS_EVENT, 
+                         split)) |> 
+  rename(DATE_ECOG = START_DATE) |> 
+  # Take latest ECOG in the +-180 day window
+  group_by(PATIENT_ID) |> 
+  arrange(desc(DATE_ECOG)) |> 
+  slice(1) |> 
+  ungroup() |> 
+  left_join(data_timeline_cea_labs_clean,
+            by = join_by(PATIENT_ID, 
+                         SAMPLE_ID, 
+                         SURGERY_DATE, 
+                         SAMPLE_DATE,
+                         OS_STATUS, 
+                         DAYS_TO_OS_EVENT, 
+                         YEARS_TO_OS_EVENT, 
+                         DFS_STATUS, 
+                         DAYS_TO_DFS_EVENT,
+                         YEARS_TO_DFS_EVENT, 
+                         split)) |>
+  select(-TEST) |> 
+  rename(DATE_CEA = START_DATE,
+         CEA = RESULT) |> 
+  # Take latest CEA in the +-180 day window
+  group_by(PATIENT_ID) |> 
+  arrange(desc(DATE_CEA)) |> 
+  slice(1) |> 
+  ungroup() |> 
+  left_join(data_timeline_tumor_site_summary,
+            by = join_by(PATIENT_ID)) |> 
+  left_join(data_timeline_mmr_clean,
+            by = join_by(PATIENT_ID, 
+                         SAMPLE_ID, 
+                         SURGERY_DATE,
+                         SAMPLE_DATE,
+                         OS_STATUS, 
+                         DAYS_TO_OS_EVENT, 
+                         YEARS_TO_OS_EVENT, 
+                         DFS_STATUS, 
+                         DAYS_TO_DFS_EVENT,
+                         YEARS_TO_DFS_EVENT, 
+                         split)) |> 
+  rename(DATE_MMR = START_DATE) |> 
+  # Take latest MMR in the +-180 day window
+  group_by(PATIENT_ID) |> 
+  arrange(desc(DATE_MMR)) |> 
+  slice(1) |> 
+  ungroup() |> 
+  left_join(data_treament_history_summary,
+            by = join_by(PATIENT_ID)) |> 
+  left_join(data_cna_summary,
+            by = join_by(PATIENT_ID)) |> 
+  left_join(data_mutations_summary,
+            by = join_by(PATIENT_ID)) |> 
+  left_join(data_sv_summary,
+            by = join_by(PATIENT_ID)) |> 
+  select(-split) 
+
+data_test_complete <- data_test |> 
+  left_join(data_clinical_sample_clean,
+            by = join_by(PATIENT_ID, 
+                         SAMPLE_ID, 
+                         SURGERY_DATE, 
+                         SAMPLE_DATE,
+                         OS_STATUS, 
+                         DAYS_TO_OS_EVENT, 
+                         YEARS_TO_OS_EVENT, 
+                         DFS_STATUS, 
+                         DAYS_TO_DFS_EVENT,
+                         YEARS_TO_DFS_EVENT, 
+                         split)) |> 
+  left_join(data_clinical_patient_clean,
+            by = join_by(PATIENT_ID, 
+                         SAMPLE_ID, 
+                         SURGERY_DATE, 
+                         SAMPLE_DATE,
+                         DAYS_TO_OS_EVENT, 
+                         YEARS_TO_OS_EVENT, 
+                         DFS_STATUS, 
+                         DAYS_TO_DFS_EVENT,
+                         YEARS_TO_DFS_EVENT, 
+                         split)) |> 
+  select(- c(OS_MONTHS,
+             OS_STATUS.x,
+             OS_STATUS.y)) |> 
+  left_join(data_timeline_performance_status_clean,
+            by = join_by(PATIENT_ID, 
+                         SAMPLE_ID, 
+                         SURGERY_DATE, 
+                         SAMPLE_DATE,
+                         OS_STATUS, 
+                         DAYS_TO_OS_EVENT, 
+                         YEARS_TO_OS_EVENT, 
+                         DFS_STATUS, 
+                         DAYS_TO_DFS_EVENT,
+                         YEARS_TO_DFS_EVENT, 
+                         split)) |> 
+  rename(DATE_ECOG = START_DATE) |> 
+  # Take latest ECOG in the +-180 day window
+  group_by(PATIENT_ID) |> 
+  arrange(desc(DATE_ECOG)) |> 
+  slice(1) |> 
+  ungroup() |> 
+  left_join(data_timeline_cea_labs_clean,
+            by = join_by(PATIENT_ID, 
+                         SAMPLE_ID, 
+                         SURGERY_DATE, 
+                         SAMPLE_DATE,
+                         OS_STATUS, 
+                         DAYS_TO_OS_EVENT, 
+                         YEARS_TO_OS_EVENT, 
+                         DFS_STATUS, 
+                         DAYS_TO_DFS_EVENT,
+                         YEARS_TO_DFS_EVENT, 
+                         split)) |>
+  select(-TEST) |> 
+  rename(DATE_CEA = START_DATE,
+         CEA = RESULT) |> 
+  # Take latest CEA in the +-180 day window
+  group_by(PATIENT_ID) |> 
+  arrange(desc(DATE_CEA)) |> 
+  slice(1) |> 
+  ungroup() |> 
+  left_join(data_timeline_tumor_site_summary,
+            by = join_by(PATIENT_ID)) |> 
+  left_join(data_timeline_mmr_clean,
+            by = join_by(PATIENT_ID, 
+                         SAMPLE_ID, 
+                         SURGERY_DATE,
+                         SAMPLE_DATE,
+                         OS_STATUS, 
+                         DAYS_TO_OS_EVENT, 
+                         YEARS_TO_OS_EVENT, 
+                         DFS_STATUS, 
+                         DAYS_TO_DFS_EVENT,
+                         YEARS_TO_DFS_EVENT, 
+                         split)) |> 
+  rename(DATE_MMR = START_DATE) |> 
+  # Take latest MMR in the +-180 day window
+  group_by(PATIENT_ID) |> 
+  arrange(desc(DATE_MMR)) |> 
+  slice(1) |> 
+  ungroup() |> 
+  left_join(data_treament_history_summary,
+            by = join_by(PATIENT_ID)) |> 
+  left_join(data_cna_summary,
+            by = join_by(PATIENT_ID)) |> 
+  left_join(data_mutations_summary,
+            by = join_by(PATIENT_ID)) |> 
+  left_join(data_sv_summary,
+            by = join_by(PATIENT_ID)) |> 
+  select(-split) 
+```
+
+```{r}
+#| label: save_data
+
+write_tsv(x = data_train_complete,
+          file = "../data/02_data_train_complete.tsv")
+
+write_tsv(x = data_test_complete,
+          file = "../data/02_data_test_complete.tsv")
+```
