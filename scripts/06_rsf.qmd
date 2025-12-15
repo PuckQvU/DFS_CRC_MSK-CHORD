@@ -1,0 +1,319 @@
+---
+title: "Random survival forest models"
+author: "Puck Quarles van Ufford"
+format: html
+---
+
+```{r}
+#| label: packages
+#| message: false
+#| echo: true
+
+library("tidyverse")
+library("caret")
+library("randomForestSRC")
+library("survival")
+```
+
+```{r}
+#| label: seed
+#| echo: true
+
+set.seed(1)
+```
+
+# Load data
+
+```{r}
+#| label: load_data
+#| message: false
+#| echo: true
+
+data_train_os <- read_tsv("../data/03_data_train_os.tsv")
+
+data_train_dfs <- read_tsv("../data/03_data_train_dfs.tsv")
+```
+
+```{r}
+#| label: feature_sets
+
+id_cols <- c("patient_id",
+             "sample_id")
+
+outcome_cols <- c("os_status",
+                  "years_to_os_event",
+                  "dfs_status",
+                  "years_to_dfs_event")
+
+cna_features <- data_train_os |> 
+  select(starts_with("cna")) |> 
+  colnames()
+
+mut_features <- data_train_os |> 
+  select(starts_with("mut")) |> 
+  colnames()
+
+sv_features <- data_train_os |> 
+  select(starts_with("sv")) |> 
+  colnames()
+
+radiology_features <- data_train_os |> 
+  select(starts_with("chest"),
+         starts_with("abdomen"),
+         starts_with("pelvis"),
+         starts_with("head"),
+         starts_with("other"),
+         starts_with("lymph_nodes"),
+         starts_with("liver"),
+         starts_with("bone"),
+         starts_with("lung"),
+         starts_with("reproductive_organs"),
+         starts_with("intra_abdominal"),
+         starts_with("cns"),
+         starts_with("pleura")) |> 
+  colnames()
+
+treatment_features <- data_train_os |> 
+  select(starts_with("biologic"),
+         starts_with("chemo"),
+         starts_with("hormone"),
+         starts_with("investigational"),
+         starts_with("prior"),
+         starts_with("radiation"),
+         starts_with("targeted")) |> 
+  colnames()
+
+nlp_features <- c("smoking_status_nlp_former_current_smoker",
+                  "smoking_status_nlp_never",
+                  "smoking_status_nlp_unknown",
+                  "prior_med_nlp_no_prior_medications",
+                  "prior_med_nlp_prior_medications_to_msk",
+                  "prior_med_nlp_unknown",
+                  "mmr_absent_false",
+                  "mmr_absent_na",
+                  "mmr_absent_true")
+
+clinical_features <- setdiff(colnames(data_train_os),
+        c(id_cols, 
+          outcome_cols, 
+          cna_features, 
+          mut_features, 
+          sv_features, 
+          nlp_features,
+          radiology_features, 
+          treatment_features)) 
+```
+
+# Settings
+
+```{r}
+#| label: settings
+
+features_included <- c(clinical_features, 
+                       #radiology_features,
+                       treatment_features)#,
+                       #nlp_features,
+                       #cna_features,
+                       #mut_features,
+                       #sv_features)
+
+caption <- "clinical, treatment." #copy number alterations, mutations, structural variants, radiology, NLP-derived
+
+file_name <- "noNLPgenomic_1000trees_lrs"
+
+trees <- 1000
+
+rule <- "logrankscore"
+```
+
+# Filter variables
+
+Select included features.
+
+```{r}
+#| label: select_feature_sets
+
+data_train_os <- data_train_os |> 
+  select(all_of(c(outcome_cols,
+                  features_included))) 
+
+data_train_dfs <- data_train_dfs |> 
+  select(all_of(c(outcome_cols,
+                  features_included))) 
+```
+
+Remove features that are linear combinations of other features
+
+```{r}
+#| label: linear_combo_filter
+#| echo: true
+
+feature_data_os <- data_train_os |> 
+    select(-all_of(outcome_cols))
+
+mm <- model.matrix(~ . -1, 
+                   data = feature_data_os)
+
+lc <- findLinearCombos(mm)
+
+cols_to_remove <- colnames(mm)[lc$remove]
+
+data_train_os <- data_train_os |> 
+  select(-all_of(cols_to_remove))
+
+feature_data_dfs <- data_train_dfs |> 
+    select(-all_of(outcome_cols))
+
+mm <- model.matrix(~ . -1, 
+                   data = feature_data_dfs)
+
+lc <- findLinearCombos(mm)
+
+cols_to_remove <- colnames(mm)[lc$remove]
+
+data_train_dfs <- data_train_dfs |> 
+  select(-all_of(cols_to_remove))
+```
+
+For the categorical features, we need to remove the features that have a category with zero events or zero controls.
+
+```{r}
+#| label: exclude_vars_no_event_levels
+#| echo: true
+
+numerical_featurs <- c("tmb_nonsynonymous",
+                       "sample_coverage",
+                       "num_icdo_dx",
+                       "age_surgery",
+                       "tumor_purity",
+                       "msi_score",
+                       "cea")
+
+explanatory_vars_os <- setdiff(colnames(data_train_os),
+                               outcome_cols)
+
+to_test_os <- setdiff(explanatory_vars_os,
+                      numerical_featurs)
+
+to_remove_os <- c()
+
+for(var in to_test_os){
+  test <- data_train_os |> 
+    group_by(.data[[var]]) |> 
+    summarise(has_os1 = any(os_status == 1),
+              has_os0 = any(os_status == 0)) |> 
+    filter(!has_os1 | !has_os0)
+  
+  if(nrow(test) > 0){
+    to_remove_os <- c(to_remove_os, var)
+  }
+}
+
+data_train_os <- data_train_os |> 
+  select(-all_of(to_remove_os))
+
+explanatory_vars_dfs <- setdiff(colnames(data_train_dfs),
+                                outcome_cols)
+
+to_test_dfs <- setdiff(explanatory_vars_dfs,
+                       numerical_featurs)
+
+to_remove_dfs <- c()
+
+for(var in to_test_dfs){
+  test <- data_train_dfs |> 
+    group_by(.data[[var]]) |> 
+    summarise(has_dfs1 = any(dfs_status == 1),
+              has_dfs0 = any(dfs_status == 0)) |> 
+    filter(!has_dfs1 | !has_dfs0)
+  
+  if(nrow(test) > 0){
+    to_remove_dfs <- c(to_remove_dfs, var)
+  }
+}
+
+data_train_dfs <- data_train_dfs |> 
+  select(-all_of(to_remove_dfs))
+```
+
+# Random survival forest models
+
+## Predicting overall survival
+
+```{r}
+#| label: rsf_os
+#| echo: true
+
+data_train_os <- data_train_os |> 
+  select(-c("dfs_status", "years_to_dfs_event"))
+
+rsf_fit_os <- rfsrc(
+  Surv(years_to_os_event, os_status) ~ ., 
+  data = data_train_os,
+  ntree = trees,
+  importance = TRUE,
+  splitrule = rule
+)
+
+c_index <- 1 - rsf_fit_os$err.rate[rsf_fit_os$ntree]
+
+print(paste("C-index:", c_index))
+
+tibble(trees = 1:rsf_fit_os$ntree,
+       oob_error = rsf_fit_os$err.rate) |> 
+  mutate(C_index = 1 - oob_error) |> 
+  filter(!is.na(C_index)) |> 
+  ggplot(mapping = aes(x = trees, 
+                       y = C_index)) +
+  geom_line() +
+  labs(x = "Number of Trees",
+       y = "C-incex",
+       title = "Concordance of RSF model for predicing OS",
+       subtitle = paste("Feature sets included: ",
+                        caption)) +
+  theme_minimal()
+
+ggsave(paste0("../results/06_C_index_os_",
+              file_name,
+              ".png"))
+```
+
+## Predicting disease-free survival
+
+```{r}
+#| label: rsf_dfs
+#| echo: true
+
+data_train_dfs <- data_train_dfs |> 
+  select(-c("os_status", "years_to_os_event"))
+
+rsf_fit_dfs <- rfsrc(
+  Surv(years_to_dfs_event, dfs_status) ~ ., 
+  data = data_train_dfs,
+  ntree = trees,
+  importance = TRUE,
+  splitrule = rule
+)
+
+c_index <- 1 - rsf_fit_dfs$err.rate[rsf_fit_dfs$ntree]
+
+print(paste("C-index:", c_index))
+
+tibble(trees = 1:rsf_fit_dfs$ntree,
+       oob_error = rsf_fit_dfs$err.rate) |> 
+  mutate(C_index = 1 - oob_error) |> 
+  filter(!is.na(C_index)) |> 
+  ggplot(mapping = aes(x = trees, 
+                       y = C_index)) +
+  geom_line() +
+  labs(x = "Number of Trees",
+       y = "C-incex",
+       title = "Concordance of RSF model for predicing DFS",
+       subtitle = paste("Feature sets included: ",
+                        caption)) +
+  theme_minimal()
+
+ggsave(paste0("../results/06_C_index_dfs_",
+              file_name,
+              ".png"))
+```

@@ -1,0 +1,616 @@
+---
+title: "Regularized Cox proportional hazards models"
+author: "Puck Quarles van Ufford"
+format: html
+---
+
+In this analysis, the regularized Cox proportional hazards model is used to assess the predictive value of the different features in our dataset for overall survival and disease-free survival. The following steps were taken.
+
+1.  The glmnet R package was used for applying elastic-net regularization to the Cox regression. The optimal value for lambda was found using 10-fold cross-validation.
+
+2.  The regularized Cox regression was used to exclude features for the univariate Cox models, if their beta was reduced to 0.
+
+3.  The univariate Cox models were used to further reduce the number of features for a multivariate Cox model, using a p-value threshold of 0.05.
+
+4.  The multivariate Cox model was used to identify features predictive of the survival outcomes.
+
+```{r}
+#| label: packages
+#| message: false
+#| echo: true
+
+library("tidyverse")
+library("janitor")
+library("glmnet")
+library("survival")
+library("survminer")
+library("knitr")
+library("broom")
+library("patchwork")
+library("fastDummies")
+library("caret")
+```
+
+```{r}
+#| label: fix_mistake_survminer_package
+#| echo: true
+
+is_ggplot <- function(x)is.ggplot(x)
+```
+
+```{r}
+#| label: seed
+#| echo: true
+
+set.seed(1)
+```
+
+# Settings
+
+```{r}
+#| label: settings
+
+regularization <- TRUE
+alpha <- 0.5 # 0.5 for elastic-net, 1 for lasso, 0 for ridge
+
+prevalence_filter <- TRUE
+prevalence_threshold <- 0.95
+```
+
+# Encoding the variables
+
+In order to use the glmnet package, the variables need to be encoded, because the package cannot handle missing values and non-numerical features. The non-numerical features and features with NAs are one-hot encoded.
+
+Missing values: - For categorical data, it is one-hot encoded and there is a column for missing values. - For numerical data: median imputation and a column for missing values. - ordinal categories; ordinal factor + mode imputation
+
+```{r}
+#| label: encode_data
+#| message: false
+#| echo: true
+
+data_train <- read_tsv("../data/02_data_train_complete.tsv")
+
+cols_to_exclude <- c("surgery_date",
+                     "sample_date",
+                     "last_follow_up_date",
+                     "date_ecog",
+                     "date_cea",
+                     "date_mmr",
+                     "days_to_os_event",
+                     "days_to_dfs_event",
+                     "clinical_group",
+                     "pathological_group",
+                     "race",
+                     "ethnicity",
+                     "age_last_follow_up",
+                     "stage_highest_recorded")
+
+numeric_cols <- c("tmb_nonsynonymous",
+                  "sample_coverage",
+                  "num_icdo_dx",
+                  "age_surgery")
+
+numeric_cols_with_NA <- c("tumor_purity",
+                          "msi_score",
+                          "cea")
+
+cna_cols <- data_train |> 
+  select(starts_with("cna_")) |>
+  colnames()
+
+ordinal_cols <- c(cna_cols,
+                  "pathological_group_simplified")
+
+ordinal_cols_with_NA <- c("clinical_group_simplified",
+                          "ecog")
+
+cols_to_one_hot_encode <- c("msi_type",
+                            "race_simplified",
+                            "ethnicity_simplified",
+                            "smoking_status_nlp",
+                            "prior_med_nlp",
+                            "primary_site",
+                            "gene_panel",
+                            "oncotree_code",
+                            "chest",
+                            "abdomen",
+                            "pelvis",
+                            "head",
+                            "other",
+                            "lymph_nodes",
+                            "other_2",
+                            "liver",
+                            "bone",
+                            "lung",
+                            "reproductive_organs",
+                            "intra_abdominal",
+                            "cns_brain",
+                            "pleura",
+                            "mmr_absent",
+                            "chemo",
+                            "investigational",
+                            "hormone",
+                            "biologic",
+                            "bone_treatment",
+                            "targeted",
+                            "radiation_therapy",
+                            "prior_medications_to_msk")
+
+
+data_train <- data_train |> 
+  select(-all_of(cols_to_exclude)) |> 
+  mutate(
+    across(all_of(c(numeric_cols_with_NA,
+                    ordinal_cols_with_NA)),
+           # indicate NAs
+           ~ as.integer(is.na(.)),
+           .names = "{.col}_na"),
+    across(all_of(numeric_cols_with_NA),
+           # impute NAs with the median
+           ~ if_else(is.na(.),
+                     median(., na.rm = TRUE),
+                     .)),
+    across(all_of(ordinal_cols_with_NA),
+           #impute NAs with the mode
+           ~ {
+             this_mode <- names(sort(table(.),
+                                     decreasing = TRUE))[1]
+             if_else(is.na(.),
+                     as.numeric(this_mode),
+                     .)}),
+    across(all_of(c(ordinal_cols,
+                    ordinal_cols_with_NA)),
+           # convert to ordered factors
+           ~ factor(., 
+                    levels = sort(unique(.)),
+                    ordered = TRUE)),
+    across(starts_with("mut_"), 
+           # convert to binary
+           ~ if_else(is.na(.x), 0, 1)),
+    across(starts_with("sv_"), 
+           # convert to binary
+           ~ if_else(is.na(.x), 0, 1)),
+    gender = if_else(gender == "Male", 0, 1),
+    early_onset = if_else(early_onset, 1, 0)
+    ) |> 
+  dummy_cols(select_columns = cols_to_one_hot_encode,
+             remove_selected_columns = TRUE) |> 
+  mutate(across(starts_with(cols_to_one_hot_encode),
+                ~ replace_na(., 0))) |> 
+  clean_names() |> 
+  remove_empty(which = "cols") |> 
+  remove_constant()
+```
+
+# Filter variables
+
+For the non-numerical explanatory variables, we need to remove the features that have a level or category with zero events or zero controls, because the Cox model won't work for those.
+
+```{r}
+#| label: prevalence_filter
+#| message: false
+#| echo: true
+
+if(prevalence_filter){
+  col_prevalence <- data_train |> 
+    select(-c(patient_id,
+              sample_id,
+              contains("status"),
+              contains("event"))) |> 
+    summarise(across(everything(),
+                     ~ max(table(.)/n()))) |> 
+    pivot_longer(everything(),
+                 names_to = "column",
+                 values_to = "prevalence")
+  
+  cols_to_keep <- col_prevalence |> 
+    filter(prevalence <= prevalence_threshold) |> 
+    pull(column)
+    
+  data_train <- data_train |> 
+    select(patient_id, 
+           sample_id, 
+           os_status,
+           years_to_os_event,
+           dfs_status,
+           years_to_dfs_event,
+           all_of(cols_to_keep))
+}
+```
+
+```{r}
+#| label: linear_combo_filter
+#| echo: true
+
+explanatory_vars <- setdiff(colnames(data_train),
+                            c("patient_id",
+                              "sample_id",
+                              "os_status",
+                              "years_to_os_event",
+                              "dfs_status",
+                              "years_to_dfs_event"))
+
+explanatory_data <- data_train |> 
+  select(all_of(explanatory_vars))
+
+mm <- model.matrix(~ . -1, 
+                   data = explanatory_data)
+
+lc <- findLinearCombos(mm)
+
+cols_to_remove <- colnames(mm)[lc$remove]
+
+cols_to_remove <- str_remove(cols_to_remove, 
+                             "\\..*$")
+
+data_train <- data_train |> 
+  select(-all_of(cols_to_remove))
+```
+
+```{r}
+#| label: exclude_vars_no_event_levels
+#| echo: true
+
+explanatory_vars <- setdiff(colnames(data_train),
+                            c("patient_id",
+                              "sample_id",
+                              "os_status",
+                              "years_to_os_event",
+                              "dfs_status",
+                              "years_to_dfs_event"))
+
+to_test <- setdiff(explanatory_vars, c(numeric_cols, 
+                                       numeric_cols_with_NA))
+
+to_remove_os <- c()
+
+for(var in to_test){
+  test <- data_train |> 
+    group_by(.data[[var]]) |> 
+    summarise(has_os1 = any(os_status == 1),
+              has_os0 = any(os_status == 0)) |> 
+    filter(!has_os1 | !has_os0)
+  
+  if(nrow(test) > 0){
+    to_remove_os <- c(to_remove_os, var)
+  }
+}
+
+print(paste("Number of features to remove due to no OS variation:", 
+            length(to_remove_os)))
+
+to_remove_dfs <- c()
+
+for(var in to_test){
+  test <- data_train |> 
+    group_by(.data[[var]]) |> 
+    summarise(has_dfs1 = any(dfs_status == 1),
+              has_dfs0 = any(dfs_status == 0)) |> 
+    filter(!has_dfs1 | !has_dfs0)
+  
+  if(nrow(test) > 0){
+    to_remove_dfs <- c(to_remove_dfs, var)
+  }
+}
+
+print(paste("Number of features to remove due to no DFS variation:", 
+            length(to_remove_dfs)))
+```
+
+# Regularized CPH models
+
+## OS
+
+```{r}
+#| label: regularized_cph_os
+#| echo: true
+
+x_os <- data_train |> 
+  select(-c(patient_id, 
+            sample_id,
+            contains("status"),
+            contains("event"),
+            all_of(to_remove_os))) |> 
+  as.matrix()
+
+y_os <- Surv(data_train$years_to_os_event,
+             data_train$os_status)
+
+if (regularization) {
+  cvfit_os <- cv.glmnet(x_os, 
+                        y_os,
+                        family = "cox",
+                        type.measure = "C",
+                        alpha = alpha)
+  
+  lambda_os <- cvfit_os$lambda.min
+  print(paste("Lambda:", lambda_os))
+  
+  betas_os <- coef(cvfit_os, 
+                   s = lambda_os)
+  beta_vec_os <- as.numeric(betas_os)
+  nonzero_features_os <- rownames(betas_os)[which(beta_vec_os != 0)]
+  
+  print(paste("n non-zero features:",
+              length(nonzero_features_os)))
+  
+  plot(cvfit_os, 
+       xlab = "Log(lambda)")
+  abline(v = log(lambda_os), lty = 2, col = "red")
+  title("Effect of penalty strength lambda on the C-index for predicting OS.", line = 2.5)
+  
+} else {
+  nonzero_features_os <- colnames(x_os)
+  
+  print(paste("n features:", length(nonzero_features_os)))
+}
+```
+
+## DFS
+
+```{r}
+#| label: regularized_cph_dfs
+#| echo: true
+
+x_dfs <- data_train |> 
+  select(-c(patient_id, 
+            sample_id,
+            contains("status"),
+            contains("event"),
+            all_of(to_remove_dfs))) |> 
+  as.matrix()
+
+y_dfs <- Surv(data_train$years_to_dfs_event,
+              data_train$dfs_status)
+
+if (regularization) {
+  cvfit_dfs <- cv.glmnet(x_dfs, 
+                         y_dfs,
+                         family = "cox",
+                         type.measure = "C",
+                         alpha = alpha)
+  
+  lambda_dfs <- cvfit_dfs$lambda.min
+  print(paste("Lambda:", lambda_dfs))
+  
+  betas_dfs <- coef(cvfit_dfs, s = lambda_dfs)
+  beta_vec_dfs <- as.numeric(betas_dfs)
+  nonzero_features_dfs <- rownames(betas_dfs)[which(beta_vec_dfs != 0)]
+  
+  print(paste("n non-zero features:", 
+              length(nonzero_features_dfs)))
+  
+  plot(cvfit_dfs, 
+       xlab = "Log(lambda)")
+  abline(v = log(lambda_dfs), lty = 2, col = "red")
+  title("Effect of penalty strength lambda on the C-index for predicting DFS.", line = 2.5)
+  
+} else {
+  nonzero_features_dfs <- colnames(x_dfs)
+  
+  print(paste("n features:", length(nonzero_features_dfs)))
+}
+```
+
+# Univariate CPH models
+
+### OS
+
+```{r}
+#| label: univ_cph_OS
+#| echo: true
+#| warning: false
+
+formulas_OS <- sapply(nonzero_features_os,
+                      function(x){
+                        as.formula(paste("Surv(years_to_os_event, os_status) ~", 
+                                         x))
+                        })
+
+models_OS <- lapply(formulas_OS,
+                    function(x){
+                      coxph(x, 
+                            data = data_train)
+                      })
+
+res_OS <- lapply(models_OS,
+                 function(x){
+                   x <- summary(x)
+                   p <- signif(x$wald["pvalue"],
+                               digits = 3)
+                   wald <- signif(x$wald["test"],
+                                  digits = 3)
+                   beta <- signif(x$coef[1],
+                                  digits = 3)
+                   hr <- signif(x$coef[2],
+                                digits = 3)
+                   res <- c(beta, hr, wald, p)
+                   names(res) <- c("beta", "hr", "wald_test", "p_value")
+                   return(res)
+                   }) |> 
+  as.data.frame() |> 
+  t() |> 
+  as_tibble(rownames = NA) |> 
+  rownames_to_column("var")
+
+significant_vars_OS <- res_OS |> 
+  arrange(p_value) |> 
+  filter(p_value < 0.05) |> 
+  pull(var)
+
+res_OS |> 
+  arrange(p_value) |> 
+  slice_head(n = 10) |> 
+  kable(digits = 5,
+        caption = "Top 10 most significant variables for predicing OS")
+
+print(paste("Number of significant features: ",
+            length(significant_vars_OS)))
+```
+
+### DFS
+
+```{r}
+#| label: univ_cph_DFS
+#| echo: true
+#| warning: false
+
+formulas_DFS <- sapply(nonzero_features_dfs,
+                       function(x){
+                         as.formula(paste("Surv(years_to_dfs_event, dfs_status) ~", 
+                                          x))
+                         })
+
+models_DFS <- lapply(formulas_DFS,
+                     function(x){
+                       coxph(x, 
+                             data = data_train)
+                       })
+
+res_DFS <- lapply(models_DFS,
+                  function(x){
+                    x <- summary(x)
+                    p <- signif(x$wald["pvalue"],
+                                digits = 3)
+                    wald <- signif(x$wald["test"],
+                                   digits = 3)
+                    beta <- signif(x$coef[1],
+                                   digits = 3)
+                    hr <- signif(x$coef[2],
+                                 digits = 3)
+                    res <- c(beta, hr, wald, p)
+                    names(res) <- c("beta", "hr", "wald_test", "p_value")
+                    return(res)
+                    }) |> 
+  as.data.frame() |> 
+  t() |> 
+  as_tibble(rownames = NA) |> 
+  rownames_to_column("var")
+
+significant_vars_DFS <- res_DFS |> 
+  arrange(p_value) |> 
+  filter(p_value < 0.05) |> 
+  pull(var)
+
+res_DFS |> 
+  arrange(p_value) |> 
+  slice_head(n = 10) |> 
+  kable(digits = 5,
+        caption = "Top 10 most significant variables for predicting DFS")
+
+print(paste("Number of significant features: ",
+            length(significant_vars_DFS)))
+```
+
+# Multivariate CPH
+
+## OS
+
+```{r}
+#| label: multivariate_cph_OS
+#| echo: true
+#| warning: false
+#| fig.width: 10
+#| fig.height: 30
+
+formula_multiv_os <- as.formula(str_c("Surv(years_to_os_event, os_status) ~ ",
+                                      paste(significant_vars_OS,
+                                            collapse = " + ")))
+
+model_multiv_os <- coxph(formula_multiv_os, 
+                         data = data_train)
+
+print(paste("C index:", summary(model_multiv_os)$concordance[1] ))
+print(paste("p value:", summary(model_multiv_os)$logtest["pvalue"] ))
+
+
+model_multiv_os_tidy <- tidy(model_multiv_os, 
+                             exponentiate = TRUE, 
+                             conf.int = TRUE)
+
+model_multiv_os_tidy |> 
+  mutate(significant = ifelse(p.value < 0.05, "Yes", "No")) |> 
+  ggplot(mapping = aes(x = estimate, 
+                       y = term,
+                       color = significant)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = conf.low,
+                     xmax = conf.high)) +  
+  geom_vline(xintercept = 1, 
+             linetype = "dashed") +  
+  scale_x_log10() + 
+  scale_color_manual(values = c("Yes" = "red", "No" = "grey40")) +
+  labs(
+    x = "Hazard Ratio (95% CI, log scale)",
+    y = ""
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 12)
+  )
+
+significant_mutiv_os <- model_multiv_os_tidy |> 
+  filter(p.value < 0.05) |> 
+  pull(term)
+
+print(paste("Number of significant features:", 
+            length(significant_mutiv_os)))
+
+print(significant_mutiv_os)
+```
+
+## DFS
+
+```{r}
+#| label: multivariate_cph_DFS
+#| echo: true
+#| warning: false
+#| fig.width: 10
+#| fig.height: 15
+
+formula_multiv_dfs <- as.formula(str_c("Surv(years_to_dfs_event, dfs_status) ~ ",
+                                       paste(significant_vars_DFS,
+                                             collapse = " + ")))
+
+model_multiv_dfs <- coxph(formula_multiv_dfs,
+                          data = data_train)
+
+print(paste("C index:", summary(model_multiv_dfs)$concordance[1] ))
+print(paste("p value:", summary(model_multiv_dfs)$logtest["pvalue"] ))
+
+model_multiv_dfs_tidy <- tidy(model_multiv_dfs, 
+                              exponentiate = TRUE, 
+                              conf.int = TRUE)
+
+model_multiv_dfs_tidy |> 
+  mutate(significant = ifelse(p.value < 0.05, "Yes", "No")) |> 
+  ggplot(mapping = aes(x = estimate, 
+                       y = term,
+                       color = significant)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = conf.low,
+                     xmax = conf.high)) +  
+  geom_vline(xintercept = 1, 
+             linetype = "dashed") +  
+  scale_x_log10() + 
+  scale_color_manual(values = c("Yes" = "red", "No" = "grey40")) +
+  labs(
+    x = "Hazard Ratio (95% CI, log scale)",
+    y = ""
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 12)
+  )
+
+significant_mutiv_dfs <- model_multiv_dfs_tidy |> 
+  filter(p.value < 0.05) |> 
+  pull(term)
+
+print(paste("Number of significant features:", 
+            length(significant_mutiv_dfs)))
+
+print(significant_mutiv_dfs)
+```

@@ -1483,7 +1483,8 @@ data_train_complete <- data_train |>
             by = join_by(PATIENT_ID)) |> 
   left_join(data_sv_summary,
             by = join_by(PATIENT_ID)) |> 
-  select(-split) 
+  select(-split) |> 
+  clean_names()
 
 data_test_complete <- data_test |> 
   left_join(data_clinical_sample_clean,
@@ -1578,7 +1579,8 @@ data_test_complete <- data_test |>
             by = join_by(PATIENT_ID)) |> 
   left_join(data_sv_summary,
             by = join_by(PATIENT_ID)) |> 
-  select(-split) 
+  select(-split) |> 
+  clean_names()
 ```
 
 ```{r}
