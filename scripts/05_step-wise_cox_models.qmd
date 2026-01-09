@@ -33,6 +33,8 @@ data_train_os <- read_tsv("../data/03_data_train_os.tsv")
 data_train_dfs <- read_tsv("../data/03_data_train_dfs.tsv")
 ```
 
+Define feature types.
+
 ```{r}
 #| label: feature_sets
 
@@ -109,21 +111,21 @@ clinical_features <- setdiff(colnames(data_train_os),
 #| label: settings
 
 features_included <- c(clinical_features, 
-                       #radiology_features,
-                       treatment_features)#,
-                       #nlp_features,
-                       #cna_features,
-                       #mut_features,
-                       #sv_features)
+                       radiology_features,
+                       treatment_features,
+                       nlp_features,
+                       cna_features,
+                       mut_features,
+                       sv_features)
 
-caption <- "clinical, treatment." # copy number variations, mutations, structural variants, radiology, NLP-derived
+caption <- "clinical, treatment, radiology, NLP-derived, copy number variations, mutations, structural variants."
 
-file_name <- "noNLPgenomic_100max"
+file_name <- "05_Forward_Cox_5CV_all_100max"
 
 max_iter <- 100
 ```
 
-# Filter variables
+# Prepare data
 
 Select included features.
 
@@ -139,12 +141,13 @@ data_train_dfs <- data_train_dfs |>
                   features_included))) 
 ```
 
-Remove features that are linear combinations of other features
+Remove features that are linear combinations of other features.
 
 ```{r}
 #| label: linear_combo_filter
 #| echo: true
 
+# OS
 feature_data_os <- data_train_os |> 
     select(-all_of(outcome_cols))
 
@@ -158,6 +161,7 @@ cols_to_remove <- colnames(mm)[lc$remove]
 data_train_os <- data_train_os |> 
   select(-all_of(cols_to_remove))
 
+# DFS
 feature_data_dfs <- data_train_dfs |> 
     select(-all_of(outcome_cols))
 
@@ -186,6 +190,7 @@ numerical_featurs <- c("tmb_nonsynonymous",
                        "msi_score",
                        "cea")
 
+# OS
 explanatory_vars_os <- setdiff(colnames(data_train_os),
                                outcome_cols)
 
@@ -207,8 +212,11 @@ for(var in to_test_os){
 }
 
 data_train_os <- data_train_os |> 
-  select(-all_of(to_remove_os))
+  select(-all_of(to_remove_os)) |>
+  select(-c("dfs_status", 
+            "years_to_dfs_event"))
 
+# DFS
 explanatory_vars_dfs <- setdiff(colnames(data_train_dfs),
                                 outcome_cols)
 
@@ -230,10 +238,113 @@ for(var in to_test_dfs){
 }
 
 data_train_dfs <- data_train_dfs |> 
-  select(-all_of(to_remove_dfs))
+  select(-all_of(to_remove_dfs)) |>
+  select(-c("os_status", 
+            "years_to_os_event"))
 ```
 
 # Cox propostional hazards models with step-wise forward feature selection
+
+Set up cross-validation folds.
+
+```{r}
+#| label: 5_fold_CV
+#| echo: true
+
+folds_os <- createFolds(data_train_os$os_status,
+                        k = 5,
+                        list = TRUE,
+                        returnTrain = FALSE)
+
+folds_dfs <- createFolds(data_train_dfs$dfs_status,
+                         k = 5,
+                         list = TRUE,
+                         returnTrain = FALSE)
+```
+
+Forward step-wise Cox proportional hazards model function.
+
+```{r}
+#| label: Cox_function
+#| echo: true
+
+forward_cox_cv <- function(data, 
+                           time_var, 
+                           status_var, 
+                           folds, 
+                           max_iter) {
+
+  outcome_cols <- c(time_var, 
+                    status_var)
+  
+  features_all <- setdiff(colnames(data), 
+                          outcome_cols)
+
+  results <- list()
+
+  for (k in seq_along(folds)) {
+
+    test_idx  <- folds[[k]]
+    train_idx <- setdiff(seq_len(nrow(data)),
+                         test_idx)
+
+    data_train <- data[train_idx, ]
+    data_test  <- data[test_idx, ]
+
+    features <- features_all
+    added_features <- character()
+
+    max_iter_k <- min(length(features), 
+                      max_iter)
+
+    for (iter in seq_len(max_iter_k)) {
+
+      c_indices <- tibble(feature = character(),
+                          c_index = numeric())
+
+      for (f in features) {
+
+        formula <- as.formula(paste0(
+          "Surv(", time_var, ", ", status_var,  ") ~ ",
+          paste(c(added_features,
+                  f), 
+                collapse = " + ")))
+
+        model <- coxph(formula, 
+                       data = data_train)
+
+        lp <- predict(model, 
+                      newdata = data_test, 
+                      type = "lp")
+
+        c_index <- survConcordance(as.formula(paste0(
+          "Surv(", time_var, ", ", status_var, ") ~ lp")),
+          data = data_test)$concordance
+
+        c_indices <- add_row(c_indices,
+                             feature = f,
+                             c_index = c_index)
+      }
+
+      best <- c_indices$feature[which.max(c_indices$c_index)]
+
+      results[[length(results) + 1]] <- tibble(
+        fold = k,
+        iteration = iter,
+        added_feature = best,
+        c_index = max(c_indices$c_index)
+      )
+
+      added_features <- c(added_features, 
+                          best)
+      features <- setdiff(features, 
+                          best)
+    }
+  }
+
+  bind_rows(results)
+}
+```
 
 ## Predicting overall survival
 
@@ -242,73 +353,46 @@ data_train_dfs <- data_train_dfs |>
 #| echo: true
 #| warning: false
 
-features_os <- setdiff(colnames(data_train_os), 
-                       outcome_cols)
+cv_os <- forward_cox_cv(
+  data      = data_train_os,
+  time_var  = "years_to_os_event",
+  status_var = "os_status",
+  folds     = folds_os,
+  max_iter  = max_iter
+)
 
-max_iter_os <- ifelse(length(features_os) < max_iter,
-                      length(features_os),
-                      max_iter)
+write_tsv(x = cv_os,
+         file = paste0("../results/05_",
+                       file_name,
+                       "_results_OS.tsv"))
 
-added_features_os <- c()
+summary_os <- cv_os |> 
+  group_by(iteration) |> 
+  summarise(
+    mean_c_index = mean(c_index),
+    lower_95 = quantile(c_index, 0.025),
+    upper_95 = quantile(c_index, 0.975),
+    .groups = "drop"
+  )
 
-iter <- 1
-
-result_os <- data.frame(iteration = integer(),
-                        added_feature = character(),
-                        C_index = double())
-
-while (iter != max_iter_os + 1) {
-  c_indeces <- data.frame(feature = character(),
-                          C_index = double())
-  
-  for(f in features_os){
-    formula <- as.formula(paste("Surv(years_to_os_event, os_status) ~",
-                                paste(c(added_features_os, f),
-                                      collapse = " + ")))
-    
-    model <- coxph(formula,
-                   data = data_train_os)
-    
-    c_index <- summary(model)$concordance[1]
-    
-    c_indeces <- add_row(c_indeces,
-                         feature = f, 
-                         C_index = c_index)
-  }
-
-  best <- c_indeces$feature[which.max(c_indeces$C_index)]
-  
-  result_os <- add_row(result_os,
-                       iteration = iter,
-                       added_feature = best,
-                       C_index = max(c_indeces$C_index))
-  
-  iter <- iter + 1
-  features_os <- setdiff(features_os, best)
-  added_features_os <- c(added_features_os, best)
-}
-
-write_tsv(x = result_os,
-         file = paste0("../results/05_result_os_",
-                       file_name, 
-                       ".tsv"))
-
-result_os |> 
-  ggplot(mapping = aes(x = iteration,
-                       y = C_index)) + 
+summary_os |> 
+  ggplot(mapping = aes(x = iteration, 
+                       y = mean_c_index)) +
   geom_line() +
+  geom_ribbon(aes(ymin = lower_95, 
+                  ymax = upper_95),
+              alpha = 0.2) +
   labs(
-    x = "n features included",
-    y = "C index",
-    title = "Concordance of step-wise Cox model for predicing OS",
-    subtitle = paste("Feature sets included: ", 
-                     caption)
-  ) + 
+    x = "Number of features included",
+    y = "C-index (95% CI)",
+    title = "5-fold CV step-wise Cox model (OS)",
+    subtitle = paste("Feature sets included:", caption)
+  ) +
   theme_minimal()
 
-ggsave(paste0("../results/05_C_index_os_",
-                       file_name, 
-                       ".png"))
+ggsave(paste0("../results/05_",
+                       file_name,
+                       "_concordance_OS.png"))
 ```
 
 ## Predicting disease-free survival
@@ -318,71 +402,45 @@ ggsave(paste0("../results/05_C_index_os_",
 #| echo: true
 #| warning: false
 
-features_dfs <- setdiff(colnames(data_train_dfs), 
-                        outcome_cols)
+cv_dfs <- forward_cox_cv(
+  data       = data_train_dfs,
+  time_var   = "years_to_dfs_event",
+  status_var = "dfs_status",
+  folds      = folds_dfs,
+  max_iter   = max_iter
+)
 
-max_iter_dfs <- ifelse(length(features_dfs) < max_iter,
-                       length(features_dfs),
-                       max_iter)
+write_tsv(x = cv_dfs,
+         file = paste0("../results/05_",
+                       file_name,
+                       "_results_DFS.tsv"))
 
-added_features_dfs <- c()
 
-iter <- 1
+summary_dfs <- cv_dfs |> 
+  group_by(iteration) |> 
+  summarise(
+    mean_c_index = mean(c_index),
+    lower_95 = quantile(c_index, 0.025),
+    upper_95 = quantile(c_index, 0.975),
+    .groups = "drop"
+  )
 
-result_dfs <- data.frame(iteration = integer(),
-                     added_feature = character(),
-                     C_index = double())
-
-while (iter != max_iter_dfs + 1) {
-  c_indeces <- data.frame(feature = character(),
-                          C_index = double())
-  
-  for(f in features_dfs){
-    formula <- as.formula(paste("Surv(years_to_dfs_event, dfs_status) ~",
-                                paste(c(added_features_dfs, f),
-                                      collapse = " + ")))
-    
-    model <- coxph(formula,
-                   data = data_train_dfs)
-    
-    c_index <- summary(model)$concordance[1]
-    
-    c_indeces <- add_row(c_indeces,
-                         feature = f, 
-                         C_index = c_index)
-  }
-
-  best <- c_indeces$feature[which.max(c_indeces$C_index)]
-  
-  result_dfs <- add_row(result_dfs,
-                       iteration = iter,
-                       added_feature = best,
-                       C_index = max(c_indeces$C_index))
-  
-  iter <- iter + 1
-  features_dfs <- setdiff(features_dfs, best)
-  added_features_dfs <- c(added_features_dfs, best)
-}
-
-write_tsv(x = result_dfs,
-         file = paste0("../results/05_result_dfs_",
-                       file_name, 
-                       ".tsv"))
-
-result_dfs |> 
-  ggplot(mapping = aes(x = iteration,
-                       y = C_index)) + 
+summary_dfs |> 
+  ggplot(mapping = aes(x = iteration, 
+                       y = mean_c_index)) +
   geom_line() +
+  geom_ribbon(aes(ymin = lower_95, 
+                  ymax = upper_95),
+              alpha = 0.2) +
   labs(
-    x = "n features included",
-    y = "C index",
-    title = "Concordance of step-wise Cox model for predicing DFS",
-    subtitle = paste("Feature sets included: ", 
-                     caption)
-  ) + 
+    x = "Number of features included",
+    y = "C-index (95% CI)",
+    title = "5-fold CV step-wise Cox model (DFS)",
+    subtitle = paste("Feature sets included:", caption)
+  ) +
   theme_minimal()
 
-ggsave(paste0("../results/05_C_index_dfs_",
-                       file_name, 
-                       ".png"))
+ggsave(paste0("../results/05_",
+                       file_name,
+                       "_concordance_DFS.png"))
 ```
