@@ -112,20 +112,20 @@ clinical_features <- setdiff(colnames(data_train_os),
 #| label: settings
 
 features_included <- c(clinical_features, 
-                       radiology_features,
-                       treatment_features,
-                       nlp_features,
-                       cna_features,
-                       mut_features,
-                       sv_features)
+                       #radiology_features,
+                       treatment_features)#,
+                       #nlp_features,
+                       #cna_features,
+                       #mut_features,
+                       #sv_features)
 
-caption <- "clinical, treatment, radiology, NLP-derived, copy number alterations, mutations, structural variants."
+caption <- "noNLPgenomic"
 
-file_name <- "06_RSF_5CV_all_1000trees_lrs"
+file_name <- "06_RSF_5CV_noNLPgenomic_1000trees_bs"
 
 trees <- 1000
 
-rule <- "logrankscore"
+rule <- "bs.gradient" # logrank (default), bs.gradient, or logrankscore
 
 tree_grid <- c(1, seq(50, trees, by = 50))
 ```
@@ -289,8 +289,7 @@ rsf_res_os <- map_dfr(tree_grid,
                           os_status) ~ .,
                      data = train_data,
                      ntree = trees,
-                     splitrule = rule,
-                     importance = FALSE)
+                     splitrule = rule)
 
         pred <- predict(fit, 
                         newdata = test_data)
@@ -342,6 +341,19 @@ summary_os |>
 ggsave(paste0("../results/",
               file_name,
               "_concordance_OS.png"))
+
+final_os <- summary_os |> 
+  filter(trees == max(trees)) |> 
+  mutate(model = "RSF",
+         features = caption,
+         outcome = "OS",
+         rule = rule) |> 
+  select(c(model, features, outcome, 
+           c_index = mean_c_index, lower_95, upper_95, rule))
+
+write_tsv(final_os,
+          file = "../results/06_RSF_5CV_model_results.tsv",
+          append = TRUE)
 ```
 
 ## Predicting disease-free survival
@@ -366,8 +378,7 @@ rsf_res_dfs <- map_dfr(tree_grid,
                           dfs_status) ~ .,
                      data = train_data,
                      ntree = trees,
-                     splitrule = rule,
-                     importance = FALSE)
+                     splitrule = rule)
 
         pred <- predict(fit, 
                         newdata = test_data)
@@ -419,4 +430,17 @@ summary_dfs |>
 ggsave(paste0("../results/",
               file_name,
               "_concordance_DFS.png"))
+
+final_dfs <- summary_dfs |> 
+  filter(trees == max(trees)) |> 
+  mutate(model = "RSF",
+         features = caption,
+         outcome = "DFS",
+         rule = rule) |> 
+  select(c(model, features, outcome, 
+           c_index = mean_c_index, lower_95, upper_95, rule))
+
+write_tsv(final_dfs,
+          file = "../results/06_RSF_5CV_model_results.tsv",
+          append = TRUE)
 ```

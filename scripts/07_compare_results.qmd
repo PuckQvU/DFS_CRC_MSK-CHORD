@@ -1,0 +1,61 @@
+---
+title: "Compare model results"
+author: "Puck Quarles van Ufford"
+format: html
+---
+
+```{r}
+#| label: packages
+#| message: false
+#| echo: true
+
+library("tidyverse")
+```
+
+# Load results
+
+```{r}
+#| label: load_results
+#| message: false
+#| echo: true
+
+results_RSF <- read_tsv("../results/06_RSF_5CV_model_results.tsv", 
+                        col_names = c("model", "features", "outcome",
+                                      "C_index", "upper_95", "lower_95", "split_rule"))
+
+results_RSF
+```
+
+
+
+
+# Summarize results
+
+Compare C-indeces across different RSF models.
+
+```{r}
+#| label: rsf_c_indeces
+#| message: false
+#| echo: true
+
+results_RSF |> 
+  mutate(outcome = factor(outcome, 
+                          levels = c("OS", "DFS"))) |> 
+  ggplot(mapping = aes(x = features,
+                       y = C_index,
+                       color = split_rule)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = lower_95, 
+                    ymax = upper_95),
+                width = 0.2,
+                alpha = 0.5) +
+  labs(x = "Types of features included",
+       y = "C-index (95% CI)",
+       title = "5-fold CV RSF model") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  facet_wrap(~ outcome, 
+             ncol = 2)
+  
+ggsave("../results/07_RSF_c_indeces.png") 
+```
