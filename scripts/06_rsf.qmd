@@ -293,9 +293,11 @@ rsf_res_os <- map_dfr(tree_grid,
 
         pred <- predict(fit, 
                         newdata = test_data)
+        
+        risk <- -pred$predicted
 
         concordance(Surv(test_data$years_to_os_event, 
-                         test_data$os_status) ~ pred$predicted)$concordance
+                         test_data$os_status) ~ risk)$concordance
       }
     )
 
@@ -319,6 +321,7 @@ summary_os <- rsf_res_os |>
                values_to = "c_index") |> 
   group_by(trees) |> 
   summarise(mean_c_index = mean(c_index),
+            sd_c_index = sd(c_index),
             lower_95 = quantile(c_index, 0.025),
             upper_95 = quantile(c_index, 0.975),
             .groups = "drop")
@@ -349,7 +352,8 @@ final_os <- summary_os |>
          outcome = "OS",
          rule = rule) |> 
   select(c(model, features, outcome, 
-           c_index = mean_c_index, lower_95, upper_95, rule))
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, rule))
 
 write_tsv(final_os,
           file = "../results/06_RSF_5CV_model_results.tsv",
@@ -382,9 +386,11 @@ rsf_res_dfs <- map_dfr(tree_grid,
 
         pred <- predict(fit, 
                         newdata = test_data)
+        
+        risk <- -pred$predicted
 
         concordance(Surv(test_data$years_to_dfs_event, 
-                         test_data$dfs_status) ~ pred$predicted)$concordance
+                         test_data$dfs_status) ~ risk)$concordance
       }
     )
 
@@ -408,6 +414,7 @@ summary_dfs <- rsf_res_dfs |>
                values_to = "c_index") |> 
   group_by(trees) |> 
   summarise(mean_c_index = mean(c_index),
+            sd_c_index = sd(c_index),
             lower_95 = quantile(c_index, 0.025),
             upper_95 = quantile(c_index, 0.975),
             .groups = "drop")
@@ -438,7 +445,8 @@ final_dfs <- summary_dfs |>
          outcome = "DFS",
          rule = rule) |> 
   select(c(model, features, outcome, 
-           c_index = mean_c_index, lower_95, upper_95, rule))
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, rule))
 
 write_tsv(final_dfs,
           file = "../results/06_RSF_5CV_model_results.tsv",
