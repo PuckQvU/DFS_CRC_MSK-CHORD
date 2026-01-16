@@ -12,6 +12,7 @@ format: html
 library("tidyverse")
 library("survival")
 library("caret")
+library("fastshap")
 ```
 
 ```{r}
@@ -118,7 +119,7 @@ features_included <- c(clinical_features,
                        mut_features,
                        sv_features)
 
-caption <- "clinical, treatment, radiology, NLP-derived, copy number variations, mutations, structural variants."
+caption <- "all" 
 
 file_name <- "05_Forward_Cox_5CV_all_100max"
 
@@ -362,7 +363,7 @@ cv_os <- forward_cox_cv(
 )
 
 write_tsv(x = cv_os,
-         file = paste0("../results/05_",
+         file = paste0("../results/",
                        file_name,
                        "_results_OS.tsv"))
 
@@ -370,6 +371,7 @@ summary_os <- cv_os |>
   group_by(iteration) |> 
   summarise(
     mean_c_index = mean(c_index),
+    sd_c_index = sd(c_index),
     lower_95 = quantile(c_index, 0.025),
     upper_95 = quantile(c_index, 0.975),
     .groups = "drop"
@@ -386,13 +388,27 @@ summary_os |>
     x = "Number of features included",
     y = "C-index (95% CI)",
     title = "5-fold CV step-wise Cox model (OS)",
-    subtitle = paste("Feature sets included:", caption)
+    subtitle = paste("Feature sets included:", 
+                     caption)
   ) +
   theme_minimal()
 
-ggsave(paste0("../results/05_",
+ggsave(paste0("../results/",
                        file_name,
                        "_concordance_OS.png"))
+
+best_os <- summary_os |> 
+  filter(mean_c_index == max(mean_c_index)) |> 
+  mutate(model = "Forward_Cox",
+         features = caption,
+         outcome = "OS") |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, iteration))
+
+write_tsv(best_os,
+          file = "../results/05_Forward_Cox_5CV_model_results.tsv",
+          append = TRUE)
 ```
 
 ## Predicting disease-free survival
@@ -411,15 +427,15 @@ cv_dfs <- forward_cox_cv(
 )
 
 write_tsv(x = cv_dfs,
-         file = paste0("../results/05_",
+         file = paste0("../results/",
                        file_name,
                        "_results_DFS.tsv"))
-
 
 summary_dfs <- cv_dfs |> 
   group_by(iteration) |> 
   summarise(
     mean_c_index = mean(c_index),
+    sd_c_index = sd(c_index),
     lower_95 = quantile(c_index, 0.025),
     upper_95 = quantile(c_index, 0.975),
     .groups = "drop"
@@ -436,11 +452,229 @@ summary_dfs |>
     x = "Number of features included",
     y = "C-index (95% CI)",
     title = "5-fold CV step-wise Cox model (DFS)",
-    subtitle = paste("Feature sets included:", caption)
+    subtitle = paste("Feature sets included:", 
+                     caption)
   ) +
   theme_minimal()
 
-ggsave(paste0("../results/05_",
+ggsave(paste0("../results/",
                        file_name,
                        "_concordance_DFS.png"))
+
+best_dfs <- summary_dfs |> 
+  filter(mean_c_index == max(mean_c_index)) |> 
+  mutate(model = "Forward_Cox",
+         features = caption,
+         outcome = "DFS") |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, iteration))
+
+write_tsv(best_dfs,
+          file = "../results/05_Forward_Cox_5CV_model_results.tsv",
+          append = TRUE)
 ```
+
+# Model testing
+
+```{r}
+#| label: final_model
+#| echo: true
+#| warning: false
+
+final_model <- function(data,
+                        time_var, 
+                        status_var,
+                        max_iter) {
+
+  outcome_cols <- c(time_var, 
+                    status_var)
+  
+  features <- setdiff(colnames(data), 
+                      outcome_cols)
+  
+  added_features <- character()
+  
+  for (iter in seq_len(max_iter)) {
+    
+    c_indeces <- data.frame(feature = character(),
+                            c = double())
+    
+    for (f in features) {
+
+        formula <- as.formula(paste0(
+          "Surv(", time_var, ", ", status_var,  ") ~ ",
+          paste(c(added_features,
+                  f), 
+                collapse = " + ")))
+
+        model <- coxph(formula, 
+                       data = data)
+        
+        c_index <- summary(model)$concordance[1]
+        
+        c_indeces <- add_row(c_indeces,
+                             feature = f, 
+                             c = c_index)
+
+      }
+
+      best <- c_indeces$feature[which.max(c_indeces$c)]
+      
+      added_features <- c(added_features, best)
+      
+      features <- setdiff(features, best)
+      
+      iter <- iter + 1
+  }
+  
+  formula <- as.formula(paste0(
+          "Surv(", time_var, ", ", status_var,  ") ~ ",
+          paste(c(added_features), 
+                collapse = " + ")))
+  
+  model <- coxph(formula,
+                 data = data)
+  
+  return(model)
+  }
+```
+
+Train the final models for predicting OS and DFS.
+
+```{r}
+#| label: best_model_os
+#| echo: true
+#| warning: false
+
+best_iter_os <- best_os |> 
+  pull(iteration)
+
+best_model_os <- final_model(data = data_train_os,
+                             time_var  = "years_to_os_event",
+                             status_var = "os_status",
+                             best_iter_os)
+
+summary(best_model_os)
+```
+
+```{r}
+#| label: best_model_dfs
+#| echo: true
+#| warning: false
+
+best_iter_dfs <- best_dfs |> 
+  pull(iteration)
+
+best_model_dfs <- final_model(data = data_train_dfs,
+                              time_var  = "years_to_dfs_event",
+                              status_var = "dfs_status",
+                              best_iter_dfs)
+
+summary(best_model_dfs)
+```
+
+## Feature importance
+
+```{r}
+#| label: predict_cox
+#| echo: true
+#| warning: false
+
+predict_cox <- function(model, 
+                        newdata) {
+  predict(model, 
+          newdata = newdata, 
+          type = "lp")
+}
+```
+
+```{r}
+#| label: shap_os
+#| echo: true
+#| warning: false
+
+features_train_os <- data_train_os |>
+  select(all_of(names(best_model_os$coefficients)))
+
+shap_vals_os <- explain(object = best_model_os,
+                        X = features_train_os,
+                        pred_wrapper = predict_cox,
+                        nsim = 100)
+
+shap_vals_os <- shap_vals_os |> 
+  as_tibble() |> 
+  summarise(across(everything(), 
+                   mean)) |> 
+  pivot_longer(cols = everything(),
+               names_to = "variable",
+               values_to = "importance")
+
+write_tsv(x = shap_vals_os,
+         file = paste0("../results/",
+                       file_name,
+                       "_shap_OS.tsv"))
+
+shap_vals_os |> 
+  ggplot(mapping = aes(x = importance,
+                       y = reorder(variable,
+                                   abs(importance)))) +
+  geom_col() +
+  labs(title = "Feature importance step-wise Cox model (OS)",
+       subtitle = paste("Feature sets included:", 
+                        caption),
+       x = "SHAP importance", 
+       y = NULL) +
+  theme_minimal()
+
+ggsave(paste0("../results/",
+                       file_name,
+                       "_shap_OS.png"))
+```
+
+```{r}
+#| label: shap_dfs
+#| echo: true
+#| warning: false
+
+features_train_dfs <- data_train_dfs |>
+  select(all_of(names(best_model_dfs$coefficients)))
+
+shap_vals_dfs <- explain(object = best_model_dfs,
+                         X = features_train_dfs,
+                         pred_wrapper = predict_cox,
+                         nsim = 100)
+
+shap_vals_dfs <- shap_vals_dfs |> 
+  as_tibble() |> 
+  summarise(across(everything(), 
+                   mean)) |> 
+  pivot_longer(cols = everything(),
+               names_to = "variable",
+               values_to = "importance")
+
+write_tsv(x = shap_vals_os,
+         file = paste0("../results/",
+                       file_name,
+                       "_shap_OS.tsv"))
+
+shap_vals_dfs |> 
+  ggplot(mapping = aes(x = importance,
+                       y = reorder(variable,
+                                   abs(importance)))) +
+  geom_col() +
+  labs(title = "Feature importance step-wise Cox model (DFS)",
+       subtitle = paste("Feature sets included:", 
+                        caption),
+       x = "SHAP importance", 
+       y = NULL) +
+  theme_minimal()
+
+ggsave(paste0("../results/",
+                       file_name,
+                       "_shap_DFS.png"))
+```
+
+## Predicing the test set
+
+TBD
