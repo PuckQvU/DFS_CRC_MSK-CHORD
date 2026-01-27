@@ -1,0 +1,977 @@
+---
+title: "Clean data"
+author: "Puck Quarles van Ufford"
+date: today
+format: html
+---
+
+# Set up
+
+```{r}
+#| label: packages
+#| message: false
+#| echo: true
+
+library("tidyverse")
+library("janitor")
+library("fastDummies")
+library("survival")
+library("caret")
+```
+
+# Load data
+
+```{r}
+#| label: load_data
+#| message: false
+#| echo: true
+
+data_train <- read_tsv(file = "../data/02_data_train.tsv")
+data_clinical_sample <- read_tsv(file = "../data/01_data_clinical_sample.tsv")
+data_clinical_patient <- read_tsv(file = "../data/01_data_clinical_patient.tsv")
+data_timeline_performance_status <- read_tsv(file = "../data/01_data_timeline_performance_status.tsv")
+data_timeline_cea_labs <- read_tsv(file = "../data/01_data_timeline_cea_labs.tsv")
+data_timeline_tumor_sites <- read_tsv(file = "../data/01_data_timeline_tumor_sites.tsv")
+data_timeline_mmr <- read_tsv(file = "../data/01_data_timeline_mmr.tsv")
+data_timeline_treatment <- read_tsv(file = "../data/01_data_timeline_treatment.tsv")
+data_timeline_radiation <- read_tsv(file = "../data/01_data_timeline_radiation.tsv")
+data_timeline_prior_meds <- read_tsv(file = "../data/01_data_timeline_prior_meds.tsv")
+data_cna <- read_tsv(file = "../data/01_data_cna.tsv")
+data_mutations <- read_tsv(file = "../data/01_data_mutations.tsv")
+data_sv <- read_tsv(file = "../data/01_data_sv.tsv")
+```
+
+# Clean individual datasets
+
+## Clinical sample
+
+Select training data, select relevant features, and simplify clinical and pathological groups.
+
+```{r}
+#| label: clean_data_clinical_sample
+#| message: false
+#| echo: true
+
+data_clinical_sample_clean <- data_clinical_sample |> 
+  right_join(data_train,
+             by = join_by(PATIENT_ID, 
+                          SAMPLE_ID)) |> 
+  remove_constant() |> 
+  # CANCER_TYPE_DETAILED was omitted, because it contains the same information as ONCOTREE_CODE.
+  # Columns with descriptions and comments for extra detail were removed.
+  # GLEASON_SAMPLE_LEVEL and PDL1_POSITIVE were omitted, because they were \>90% homogeneous.
+  select(- c(CANCER_TYPE_DETAILED,
+             MSI_COMMENT,
+             CLINICAL_SUMMARY,
+             ICD_O_HISTOLOGY_DESCRIPTION,
+             DIAGNOSIS_DESCRIPTION,
+             GLEASON_SAMPLE_LEVEL,
+             PDL1_POSITIVE)) |>
+  mutate(PRIMARY_SITE = str_to_lower(PRIMARY_SITE),
+         MSI_TYPE = ifelse(MSI_TYPE == "Do not report", 
+                           NA, 
+                           MSI_TYPE),
+         CLINICAL_GROUP_SIMPLIFIED = as.integer(str_sub(CLINICAL_GROUP,
+                                                        1, 1)),
+         PATHOLOGICAL_GROUP_SIMPLIFIED = as.integer(str_sub(PATHOLOGICAL_GROUP,
+                                                            1, 1))) |> 
+  select(- any_of(setdiff(colnames(data_train), "PATIENT_ID")))
+```
+
+## Clinical patient
+
+Select training data, select relevant features, simplify race and ethnicity, and calculate age at surgery.
+
+```{r}
+#| label: clean_data_clinical_patient
+#| message: false
+#| echo: true
+
+data_clinical_patient_clean <- data_clinical_patient|> 
+  right_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  remove_constant() |> 
+  # The NLP-derived tumor site data will be taken from data_timeline_tumor_sites to take the timing into account.
+  # GLEASON_FIRST_REPORTED, GLEASON_HIGHEST_REPORTED, HISTORY_OF_PDL1, HR and HER2 were omitted, because they were \>90% homogeneous.
+  select(- c(ADRENAL_GLANDS,
+             BONE,
+             CNS_BRAIN,
+             INTRA_ABDOMINAL,
+             LIVER,
+             LUNG,
+             LYMPH_NODES,
+             OTHER,
+             PLEURA,
+             REPRODUCTIVE_ORGANS,
+             GLEASON_FIRST_REPORTED, 
+             GLEASON_HIGHEST_REPORTED, 
+             HISTORY_OF_PDL1, 
+             HR,
+             HER2,
+             OS_STATUS.x,
+             OS_STATUS.y)) |> 
+  mutate(RACE_SIMPLIFIED = case_when(RACE == "White" ~ "White",
+                                     RACE == "Black Or African American" ~ "Black",
+                                     RACE == "Asian-Far East/Indian Subcont" ~ "Asian",
+                                     RACE == "Unknown" | 
+                                       RACE == "Pt Refused to Answer" ~ NA,
+                                     TRUE ~ "Other"),
+         ETHNICITY_SIMPLIFIED = case_when(ETHNICITY == "Non-Spanish; Non-Hispanic" ~ "Non-Spanish; Non-Hispanic",
+                                          ETHNICITY == "Unknown whether Spanish or not" ~ NA,
+                                          TRUE ~ "Spanish/Hispanic"),
+         EARLY_ONSET = ifelse(CURRENT_AGE_DEID < 50,
+                              TRUE,
+                              FALSE),
+         LAST_FOLLOW_UP_DATE = round(OS_MONTHS*30.44),
+         AGE_SURGERY = CURRENT_AGE_DEID - round((LAST_FOLLOW_UP_DATE - SURGERY_DATE)/365.25)) |> 
+  rename(AGE_LAST_FOLLOW_UP = CURRENT_AGE_DEID,
+         SMOKING_STATUS_NLP = SMOKING_PREDICTIONS_3_CLASSES,
+         PRIOR_MED_NLP = PRIOR_MED_TO_MSK) |> 
+  select(- any_of(setdiff(colnames(data_train), "PATIENT_ID")))
+```
+
+## Performance status
+
+Select training data, filter dates, and select relevant columns.
+
+```{r}
+#| label: clean_data_timeline_performance_status
+#| message: false
+#| echo: true
+
+data_timeline_performance_status_clean <- data_timeline_performance_status |> 
+  right_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(between(START_DATE - SURGERY_DATE, 
+                 -180, 180)) |> 
+  select(- c(STOP_DATE,
+             EVENT_TYPE,
+             SUBTYPE,
+             STYLE_COLOR)) |> 
+  select(- any_of(setdiff(colnames(data_train), "PATIENT_ID")))
+```
+
+## CEA labs
+
+Select training data, filter dates, and select relevant columns.
+
+```{r}
+#| label: clean_data_timeline_cea_labs
+#| message: false
+#| echo: true
+
+data_timeline_cea_labs_clean <- data_timeline_cea_labs |> 
+  right_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(between(START_DATE - SURGERY_DATE, 
+                 -180, 180)) |> 
+  select(- c(STOP_DATE,
+             EVENT_TYPE,
+             LR_UNIT_MEASURE,
+             TEST)) |> 
+  select(- any_of(setdiff(colnames(data_train), "PATIENT_ID")))
+```
+
+## Tumor sites
+
+Select training data, filter dates, and select relevant columns.
+
+```{r}
+#| label: clean_data_timeline_tumor_sites
+#| message: false
+#| echo: true
+
+data_timeline_tumor_sites_clean <- data_timeline_tumor_sites |> 
+  right_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(between(START_DATE - SURGERY_DATE, 
+                 -180, 180)) |> 
+  select(- c(STOP_DATE,
+             EVENT_TYPE,
+             SUBTYPE,
+             SOURCE)) |> 
+  select(- any_of(setdiff(colnames(data_train), "PATIENT_ID")))
+```
+
+## MMR
+
+Select training data, filter dates, and select relevant columns.
+
+```{r}
+#| label: clean_data_timeline_mmr
+#| message: false
+#| echo: true
+
+data_timeline_mmr_clean <- data_timeline_mmr |> 
+  right_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(between(START_DATE - SURGERY_DATE, 
+                 -180, 180)) |> 
+  select(- c(STOP_DATE,
+             EVENT_TYPE,
+             SUBTYPE)) |> 
+  select(- any_of(setdiff(colnames(data_train), "PATIENT_ID")))
+```
+
+## Treatment, radiation and prior meds
+
+For treatment data, radiation data and prior meds data, select training data, filter dates, and select relevant columns. Then combine them into treatment history data.
+
+```{r}
+#| label: clean_data_treatment_history
+#| message: false
+#| echo: true
+
+data_timeline_treatment_clean <- data_timeline_treatment |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= SURGERY_DATE + 180) |> 
+  select(PATIENT_ID,
+         START_DATE,
+         STOP_DATE,
+         SURGERY_DATE,
+         TREATMENT = SUBTYPE,
+         AGENT) |> 
+  mutate(DAYS_BEFORE_SURGERY = SURGERY_DATE - STOP_DATE)
+
+data_timeline_radiation_clean <- data_timeline_radiation |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= SURGERY_DATE + 180) |> 
+  select(PATIENT_ID,
+         START_DATE,
+         STOP_DATE,
+         SURGERY_DATE,
+         TREATMENT = SUBTYPE) |> 
+  mutate(DAYS_BEFORE_SURGERY = SURGERY_DATE - START_DATE, 
+         AGENT = NA)
+
+data_timeline_prior_meds_clean <- data_timeline_prior_meds |> 
+  inner_join(data_train,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= SURGERY_DATE + 180) |> 
+  select(PATIENT_ID,
+         START_DATE,
+         STOP_DATE,
+         SURGERY_DATE,
+         TREATMENT = SUBTYPE) |> 
+  mutate(DAYS_BEFORE_SURGERY = SURGERY_DATE - START_DATE,
+         AGENT = NA)
+
+data_treament_history_clean <- rbind(data_timeline_treatment_clean,
+                                     data_timeline_radiation_clean,
+                                     data_timeline_prior_meds_clean) 
+```
+
+## CNA
+
+Pivot data to create a sample ID column, select training data, and select relevant columns.
+
+```{r}
+#| label: clean_data_cna
+#| echo: true
+
+data_cna_clean <- data_cna |> 
+  pivot_longer(-Hugo_Symbol, 
+               names_to = "SAMPLE_ID",
+               values_to = "CNA") |> 
+  right_join(data_train,
+             by = join_by(SAMPLE_ID)) |> 
+  select(- any_of(setdiff(colnames(data_train), "PATIENT_ID")))
+```
+
+## Mutations
+
+Select relevant columns, select training data, and select one row per sample-gene combination.
+
+```{r}
+#| label: clean_data_mutations
+#| echo: true
+
+data_mutations_clean <- data_mutations |> 
+  select(SAMPLE_ID = Tumor_Sample_Barcode,
+         Hugo_Symbol,
+         Variant_Classification,
+         Variant_Type) |> 
+  right_join(data_train,
+             by = join_by(SAMPLE_ID)) |> 
+  group_by(SAMPLE_ID, Hugo_Symbol) |> 
+  slice(1) |> 
+  ungroup() |> 
+  select(- any_of(setdiff(colnames(data_train), "PATIENT_ID")))
+```
+
+## SV
+
+Select relevant columns and select training data.
+
+```{r}
+#| label: clean_data_sv
+#| echo: true
+
+data_sv_clean <- data_sv |> 
+  select(SAMPLE_ID = Sample_Id,
+         Site1_Hugo_Symbol,
+         Site2_Hugo_Symbol,
+         Class) |> 
+  inner_join(data_train,
+             by = join_by(SAMPLE_ID)) |> 
+  select(- any_of(setdiff(colnames(data_train), "PATIENT_ID")))
+```
+
+# Combine data
+
+The combined datasets contains one row per patient and the following columns:
+
+- The columns from the clinical sample and patient data.
+- Columns containing the latest ECOG score, CEA level and MMR assessment in the +- 180 day window around the surgery.
+- A summary of all tumor site data in the 180 day window, with one column for each tumor site in the data, with a 1 if it was detected in a patient at any point in that window, and a 0 if not.
+- A summary of the treatment history, with a column per treatment type and a 1 if the patient has a history of that treatment or a 0 if not.
+- A summary of the CNA, mutations and SV data, with one column per gene. The columns indicate the type of genomic data with the prefixes CNA_, Mut_ and SV_, respectively.
+
+```{r}
+#| label: summarize_data_per_patient
+#| echo: true
+
+data_timeline_tumor_sites_summary <- data_timeline_tumor_sites_clean |> 
+  group_by(PATIENT_ID) |> 
+  summarize(
+    CHEST   = as.integer(any(CHEST == 1)),
+    ABDOMEN = as.integer(any(ABDOMEN == 1)),
+    PELVIS  = as.integer(any(PELVIS == 1)),
+    HEAD    = as.integer(any(HEAD == 1)),
+    OTHER   = as.integer(any(OTHER == 1)),
+    .groups = "drop"
+  )  |> 
+  left_join(data_timeline_tumor_sites_clean |> 
+              distinct(PATIENT_ID, TUMOR_SITE) |> 
+              mutate(has_site = 1) |> 
+              pivot_wider(names_from = TUMOR_SITE,
+                          values_from = has_site,
+                          values_fill = 0),
+            by = join_by(PATIENT_ID)) |> 
+  mutate(other = ifelse(Other == 1 | OTHER == 1,
+                        1, 0)) |> 
+  select(- c(Other, OTHER))
+
+data_treament_history_summary <- data_treament_history_clean |> 
+  select(- c(AGENT,
+             SURGERY_DATE,
+             START_DATE,
+             STOP_DATE,
+             DAYS_BEFORE_SURGERY)) |> 
+  distinct(PATIENT_ID, TREATMENT, .keep_all = TRUE) |> 
+  mutate(has_treatment = 1) |> 
+  pivot_wider(id_cols = c(PATIENT_ID, everything()),
+              names_from = TREATMENT,
+              values_from = has_treatment,
+              values_fill = 0) 
+
+data_cna_summary <- data_cna_clean |> 
+  pivot_wider(names_from = Hugo_Symbol,
+              values_from = CNA,
+              names_prefix = "CNA_")
+
+data_mutations_summary <- data_mutations_clean |> 
+  select(- Variant_Type) |> 
+  pivot_wider(names_from = Hugo_Symbol,
+              values_from = Variant_Classification,
+              names_prefix = "Mut_")
+
+data_sv_summary <- data_sv_clean |> 
+  select(- Site2_Hugo_Symbol) |> 
+  pivot_wider(names_from = Site1_Hugo_Symbol,
+              values_from = Class,
+              names_prefix = "SV_")
+```
+
+```{r}
+#| label: combine_data
+#| echo: true
+
+data_train_complete <- data_train |> 
+  left_join(data_clinical_sample_clean,
+            by = join_by(PATIENT_ID)) |> 
+  left_join(data_clinical_patient_clean,
+            by = join_by(PATIENT_ID)) |> 
+  select(-OS_MONTHS) |> 
+  left_join(data_timeline_performance_status_clean,
+            by = join_by(PATIENT_ID)) |> 
+  # Take latest ECOG in the +-180 day window
+  rename(DATE_ECOG = START_DATE) |> 
+  group_by(PATIENT_ID) |> 
+  arrange(desc(DATE_ECOG)) |> 
+  slice(1) |> 
+  ungroup() |> 
+  left_join(data_timeline_cea_labs_clean,
+            by = join_by(PATIENT_ID)) |>
+  # Take latest CEA in the +-180 day window
+  rename(DATE_CEA = START_DATE,
+         CEA = RESULT) |> 
+  group_by(PATIENT_ID) |> 
+  arrange(desc(DATE_CEA)) |> 
+  slice(1) |> 
+  ungroup() |> 
+  left_join(data_timeline_tumor_sites_summary,
+            by = join_by(PATIENT_ID)) |> 
+  left_join(data_timeline_mmr_clean,
+            by = join_by(PATIENT_ID)) |> 
+  # Take latest MMR in the +-180 day window
+  rename(DATE_MMR = START_DATE) |> 
+  group_by(PATIENT_ID) |> 
+  arrange(desc(DATE_MMR)) |> 
+  slice(1) |> 
+  ungroup() |> 
+  left_join(data_treament_history_summary,
+            by = join_by(PATIENT_ID)) |> 
+  left_join(data_cna_summary,
+            by = join_by(PATIENT_ID)) |> 
+  left_join(data_mutations_summary,
+            by = join_by(PATIENT_ID)) |> 
+  left_join(data_sv_summary,
+            by = join_by(PATIENT_ID)) 
+
+data_train_complete <- data_train_complete |> 
+  remove_empty(which = "cols") |> 
+  remove_constant() |> 
+  clean_names()
+```
+
+# Encode data
+
+In this dataset, we need to encode features differently, based on whether they are numerical, nominal or ordinal. We also need to identify missing data and impute and encode that properly. Finally, certain columns need to be removed from the dataset.
+
+```{r}
+#| label: sort_features
+#| echo: true
+
+cna_cols <- data_train_complete |> 
+  select(starts_with("cna_")) |>
+  colnames()
+
+mut_cols <- data_train_complete |> 
+  select(starts_with("mut_")) |>
+  colnames()
+
+sv_cols <- data_train_complete |> 
+  select(starts_with("sv_")) |>
+  colnames()
+
+cols_to_exclude <- c("surgery_date",
+                     "sample_date",
+                     "last_follow_up_date",
+                     "date_ecog",
+                     "date_cea",
+                     "date_mmr",
+                     "days_to_os_event",
+                     "days_to_dfs_event",
+                     "clinical_group",
+                     "pathological_group",
+                     "race",
+                     "ethnicity",
+                     "age_last_follow_up",
+                     "stage_highest_recorded")
+
+numeric_cols <- c("tmb_nonsynonymous",
+                  "sample_coverage",
+                  "num_icdo_dx",
+                  "age_surgery")
+
+id_cols <- c("patient_id",
+             "sample_id")
+
+outcome_cols <- c("os_status",
+                  "dfs_status",
+                  "years_to_os_event",
+                  "years_to_dfs_event")
+
+numeric_cols_with_NA <- c("tumor_purity",
+                          "msi_score",
+                          "cea")
+
+ordinal_cols <- c(cna_cols,
+                  "pathological_group_simplified")
+
+ordinal_cols_with_NA <- c("clinical_group_simplified",
+                          "ecog")
+
+nominal_cols <- c("msi_type",
+                  "race_simplified",
+                  "ethnicity_simplified",
+                  "smoking_status_nlp",
+                  "prior_med_nlp",
+                  "primary_site",
+                  "gene_panel",
+                  "oncotree_code",
+                  "chest",
+                  "abdomen",
+                  "pelvis",
+                  "head",
+                  "other",
+                  "lymph_nodes",
+                  "liver",
+                  "bone",
+                  "lung",
+                  "reproductive_organs",
+                  "intra_abdominal",
+                  "cns_brain",
+                  "mmr_absent",
+                  "chemo",
+                  "investigational",
+                  "hormone",
+                  "biologic",
+                  "bone_treatment",
+                  "targeted",
+                  "radiation_therapy",
+                  "prior_medications_to_msk")
+
+binary_cols <- c("gender",
+                 "early_onset")
+
+# Check if all is accounted for
+setdiff(colnames(data_train_complete),
+        c(id_cols, 
+          outcome_cols, 
+          mut_cols, 
+          sv_cols,
+          cols_to_exclude, 
+          numeric_cols, 
+          numeric_cols_with_NA, 
+          ordinal_cols, 
+          ordinal_cols_with_NA, 
+          nominal_cols, 
+          binary_cols))
+```
+
+First, excluded features were removed.
+
+```{r}
+#| label: remove_excluded_features
+#| echo: true
+
+data_train_complete <- data_train_complete |> 
+  select(-all_of(cols_to_exclude)) 
+```
+
+Next, for the numerical and ordinal features with missing data, the missing data was imputed with the median and mode, respectively. Additional columns were created to indicate that the original value was NA.
+
+```{r}
+#| label: impute_missing_data
+#| echo: true
+
+data_train_complete <- data_train_complete |> 
+  mutate(
+    across(all_of(c(numeric_cols_with_NA,
+                    ordinal_cols_with_NA)),
+           ~ as.integer(is.na(.)),
+           .names = "{.col}_na"),
+    across(all_of(numeric_cols_with_NA),
+           ~ if_else(is.na(.),
+                     median(., na.rm = TRUE),
+                     .)),
+    across(all_of(ordinal_cols_with_NA),
+           ~ {
+             this_mode <- names(sort(table(.),
+                                     decreasing = TRUE))[1]
+             if_else(is.na(.),
+                     as.numeric(this_mode),
+                     .)}))
+```
+
+Nominal and binary features were one-hot encoded and if they contained missing data, it would be treated as its own category.
+
+```{r}
+#| label: encode_binary_and_nominal_data
+#| echo: true
+
+data_train_complete <- data_train_complete |> 
+  mutate(
+    across(starts_with("mut_"), 
+           ~ if_else(is.na(.x), 0, 1)),
+    across(starts_with("sv_"), 
+           ~ if_else(is.na(.x), 0, 1)),
+    gender = if_else(gender == "Male", 0, 1),
+    early_onset = if_else(early_onset, 1, 0)
+    ) |> 
+  dummy_cols(select_columns = nominal_cols,
+             remove_selected_columns = TRUE) |> 
+  mutate(across(starts_with(nominal_cols),
+                ~ replace_na(., 0)))
+```
+
+Finally, ordinal data is turned into a numerical representation, but to not force equal spacing, optimal scaling is used to maximize the likelihood function for the Cox proportional hazards model. This means that the scaling is not equal for estimating OS or DFS.
+
+```{r}
+#| label: encode_ordinal_data
+#| warning: false
+#| echo: true
+
+get_log_likelihood <- function(levels, 
+                               data, 
+                               var, 
+                               time_col, 
+                               event_col) {
+  
+  # Sort the original values for the ordinal levels
+  levels_vec <- sort(unique(data[[var]]))
+  
+  # Create a new variable with the new values for the ordinal levels
+  data[[paste0(var, "_scaled")]] <- levels[match(data[[var]], 
+                                                 levels_vec) ]
+  
+  # Fit a univariate Cox model and return the log likelihood
+  surv_formula <- as.formula(
+    paste0("Surv(", time_col, ", ", event_col, ") ~ ", var, "_scaled")
+  )
+
+  fit <- coxph(formula = surv_formula,
+               data = data)
+  
+  return(logLik(fit))
+}
+
+optimimal_scaling <- function(data, 
+                              var, 
+                              time_col, 
+                              event_col) {
+  
+  # Sort the original values for the ordinal levels and initiate the optimal scaling with 1, 2, 3, 4, ...
+  levels_vec <- sort(unique(data[[var]]))
+  
+  n_levels <- length(levels_vec)
+
+  init_levels <- seq_len(n_levels)
+  
+  # Optimize the scaling using the log likelihood of the Cox model
+  opt <- optim(
+    par = init_levels,
+    fn = function(par) -get_log_likelihood(par, 
+                                           data, 
+                                           var, 
+                                           time_col, 
+                                           event_col),
+    method = "L-BFGS-B",
+    lower = rep(0, n_levels),
+    control = list(fnscale = 1)
+  )
+
+  data.frame(value = levels_vec,
+             optimal_score = opt$par)
+}
+
+rescale_ordinal_vars <- function(data, 
+                                 ordinal_vars, 
+                                 time_col, 
+                                 event_col) {
+
+  mappings <- list()
+
+  for (var in ordinal_vars) {
+    
+    # Rescale the values assigned to the levels for each ordinal variable
+    mapping <- optimimal_scaling(data, 
+                                 var, 
+                                 time_col, 
+                                 event_col)
+    
+    mappings[[var]] <- mapping
+
+    data[[paste0(var, "_scaled")]] <-
+      mapping$optimal_score[ match(data[[var]], 
+                                   mapping$value) ]
+  }
+
+  return(list(data = data,
+              mappings = mappings))
+}
+
+data_rescaled_os <- rescale_ordinal_vars(data = data_train_complete,
+                                         ordinal_vars = c(ordinal_cols, 
+                                                          ordinal_cols_with_NA),
+                                         time_col = "years_to_os_event",
+                                         event_col = "os_status")
+
+saveRDS(object = data_rescaled_os$mappings,
+        file = "../results/03_map_ordinal_vars_OS.rds")
+
+data_train_os <- data_rescaled_os$data |> 
+  select(-c(ordinal_cols, 
+            ordinal_cols_with_NA)) |> 
+  clean_names()
+
+data_rescaled_dfs <- rescale_ordinal_vars(data = data_train_complete,
+                                          ordinal_vars = c(ordinal_cols, 
+                                                           ordinal_cols_with_NA),
+                                          time_col = "years_to_dfs_event",
+                                          event_col = "dfs_status")
+
+saveRDS(object = data_rescaled_dfs$mappings,
+        file = "../results/03_map_ordinal_vars_DFS.rds")
+
+data_train_dfs <- data_rescaled_dfs$data |> 
+  select(-c(ordinal_cols, 
+            ordinal_cols_with_NA)) |> 
+  clean_names()
+```
+
+# Filter data
+
+Remove features that are linear combinations of other features.
+
+```{r}
+#| label: lc_filter
+#| echo: true
+
+# OS
+feature_data_os <- data_train_os |> 
+    select(- all_of(c(outcome_cols, 
+                      id_cols)))
+
+mm <- model.matrix(~ . -1, 
+                   data = feature_data_os)
+
+assign_vec <- attr(mm, 
+                   "assign")
+
+term_labels <- attr(terms(~ . -1, 
+                          data = feature_data_os), 
+                    "term.labels")
+
+lc <- findLinearCombos(mm)
+
+cols_to_remove <- unique(term_labels[assign_vec[lc$remove]])
+
+data_train_os <- data_train_os |> 
+  select(- all_of(cols_to_remove))
+
+# DFS
+feature_data_dfs <- data_train_dfs |> 
+    select(- all_of(c(outcome_cols, 
+                      id_cols)))
+
+mm <- model.matrix(~ . -1, 
+                   data = feature_data_dfs)
+
+assign_vec <- attr(mm, 
+                   "assign")
+
+term_labels <- attr(terms(~ . -1, 
+                          data = feature_data_dfs), 
+                    "term.labels")
+
+lc <- findLinearCombos(mm)
+
+cols_to_remove <- unique(term_labels[assign_vec[lc$remove]])
+
+data_train_dfs <- data_train_dfs |> 
+  select(- all_of(cols_to_remove))
+```
+
+For the categorical features, we need to remove the features that have a category with zero events or zero controls.
+
+```{r}
+#| label: exclude_no_level_variation
+#| echo: true
+
+# OS
+features_os <- setdiff(colnames(data_train_os),
+                       c(outcome_cols,
+                         id_cols))
+
+to_test_os <- setdiff(features_os,
+                      c(numeric_cols,
+                        numeric_cols_with_NA))
+
+to_remove_os <- c()
+
+for(var in to_test_os){
+  test <- data_train_os |> 
+    group_by(.data[[var]]) |> 
+    summarise(has_os1 = any(os_status == 1),
+              has_os0 = any(os_status == 0)) |> 
+    filter(!has_os1 | !has_os0)
+  
+  if(nrow(test) > 0){
+    to_remove_os <- c(to_remove_os, var)
+  }
+}
+
+data_train_os <- data_train_os |> 
+  select(- all_of(to_remove_os)) |>
+  select(- c("dfs_status",
+             "years_to_dfs_event"))
+
+# DFS
+features_dfs <- setdiff(colnames(data_train_dfs),
+                        c(outcome_cols,
+                          id_cols))
+
+to_test_dfs <- setdiff(features_dfs,
+                       c(numeric_cols,
+                         numeric_cols_with_NA))
+
+to_remove_dfs <- c()
+
+for(var in to_test_dfs){
+  test <- data_train_dfs |> 
+    group_by(.data[[var]]) |> 
+    summarise(has_dfs1 = any(dfs_status == 1),
+              has_dfs0 = any(dfs_status == 0)) |> 
+    filter(!has_dfs1 | !has_dfs0)
+  
+  if(nrow(test) > 0){
+    to_remove_dfs <- c(to_remove_dfs, var)
+  }
+}
+
+data_train_dfs <- data_train_dfs |> 
+  select(- all_of(to_remove_dfs)) |>
+  select(- c("os_status",
+             "years_to_os_event"))
+```
+
+```{r}
+#| label: save_data
+#| echo: true
+
+write_tsv(x = data_train_os,
+          file = "../data/03_data_train_os.tsv")
+
+write_tsv(x = data_train_dfs,
+          file = "../data/03_data_train_dfs.tsv")
+```
+
+# Feature types
+
+In the analyses, we want to distinguish between data that is routinely collected, NLP-derived, and from genomic testing. Thus, we create data subsets with the relevant features.
+
+```{r}
+#| label: define_feature_types
+#| echo: true
+
+all_colnames <- union(colnames(data_train_os),
+                      colnames(data_train_os))
+
+cna_features <- all_colnames[startsWith(all_colnames, "cna")] 
+
+mut_features <- all_colnames[startsWith(all_colnames, "mut")] 
+
+sv_features <- all_colnames[startsWith(all_colnames, "sv")] 
+
+test <- all_colnames[startsWith(all_colnames, "cns")] 
+
+
+radiology_prefixes <- c("chest",
+                        "abdomen",
+                        "pelvis",
+                        "head",
+                        "other",
+                        "lymph_nodes",
+                        "liver",
+                        "bone",
+                        "lung",
+                        "reproductive_organs",
+                        "intra_abdominal",
+                        "cns",
+                        "pleura")
+
+radiology_features <- all_colnames[grepl(paste0("^(", 
+                                                paste(radiology_prefixes, 
+                                                      collapse = "|"), ")"), 
+                                         all_colnames)]
+
+treatment_prefixes <- c("biologic",
+                        "chemo",
+                        "hormone",
+                        "investigational",
+                        "prior",
+                        "radiation",
+                        "targeted")
+
+treatment_features <- all_colnames[grepl(paste0("^(", 
+                                                paste(treatment_prefixes, 
+                                                      collapse = "|"), ")"), 
+                                         all_colnames)]
+
+nlp_features <- c("smoking_status_nlp_former_current_smoker",
+                  "smoking_status_nlp_never",
+                  "smoking_status_nlp_unknown",
+                  "prior_med_nlp_no_prior_medications",
+                  "prior_med_nlp_prior_medications_to_msk",
+                  "prior_med_nlp_unknown",
+                  "mmr_absent_false",
+                  "mmr_absent_na",
+                  "mmr_absent_true")
+
+routine_features <- setdiff(all_colnames,
+                            c(id_cols, 
+                              outcome_cols, 
+                              cna_features, 
+                              mut_features, 
+                              sv_features, 
+                              nlp_features,
+                              radiology_features)) 
+```
+
+```{r}
+#| label: save_data_subsets
+#| echo: true
+
+data_train_os_noNLPgenomic <- data_train_os |> 
+  select(any_of(c(id_cols,
+                  outcome_cols,
+                  routine_features)))
+
+data_train_dfs_noNLPgenomic <- data_train_dfs |> 
+  select(any_of(c(id_cols,
+                  outcome_cols,
+                  routine_features)))
+
+write_tsv(x = data_train_os_noNLPgenomic,
+          file = "../data/03_data_train_os_noNLPgenomic.tsv")
+
+write_tsv(x = data_train_dfs_noNLPgenomic,
+          file = "../data/03_data_train_dfs_noNLPgenomic.tsv")
+
+data_train_os_noNLP <- data_train_os |> 
+  select(any_of(c(id_cols,
+                  outcome_cols,
+                  routine_features,
+                  cna_features,
+                  mut_features,
+                  sv_features)))
+
+data_train_dfs_noNLP <- data_train_dfs |> 
+  select(any_of(c(id_cols,
+                  outcome_cols,
+                  routine_features,
+                  cna_features,
+                  mut_features,
+                  sv_features)))
+
+write_tsv(x = data_train_os_noNLP,
+          file = "../data/03_data_train_os_noNLP.tsv")
+
+write_tsv(x = data_train_dfs_noNLP,
+          file = "../data/03_data_train_dfs_noNLP.tsv")
+
+data_train_os_nogenomic <- data_train_os |> 
+  select(any_of(c(id_cols,
+                  outcome_cols,
+                  routine_features,
+                  nlp_features,
+                  radiology_features)))
+
+data_train_dfs_nogenomic <- data_train_dfs |> 
+  select(any_of(c(id_cols,
+                  outcome_cols,
+                  routine_features,
+                  nlp_features,
+                  radiology_features)))
+
+write_tsv(x = data_train_os_nogenomic,
+          file = "../data/03_data_train_os_nogenomic.tsv")
+
+write_tsv(x = data_train_dfs_nogenomic,
+          file = "../data/03_data_train_dfs_nogenomic.tsv")
+```

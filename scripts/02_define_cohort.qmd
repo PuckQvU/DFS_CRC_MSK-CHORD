@@ -1,0 +1,335 @@
+---
+title: "Define cohort"
+author: "Puck Quarles van Ufford"
+date: today
+format: html
+---
+
+# Set up
+
+```{r}
+#| label: packages
+#| message: false
+#| echo: true
+
+library("tidyverse")
+library("rsample")
+```
+
+```{r}
+#| label: seed
+#| echo: true
+
+set.seed(8)
+```
+
+# Load data
+
+```{r}
+#| label: load_data
+#| message: false
+#| echo: true
+
+data_clinical_sample <- read_tsv(file = "../data/01_data_clinical_sample.tsv")
+data_timeline_surgery <- read_tsv(file = "../data/01_data_timeline_surgery.tsv")
+data_timeline_sample_acquisition <- read_tsv(file = "../data/01_data_timeline_specimen_surgery.tsv")
+data_timeline_cancer_presence <- read_tsv(file = "../data/01_data_timeline_cancer_presence.tsv")
+data_timeline_treatment <- read_tsv(file = "../data/01_data_timeline_treatment.tsv")
+data_timeline_radiation <- read_tsv(file = "../data/01_data_timeline_radiation.tsv")
+data_clinical_patient <- read_tsv(file = "../data/01_data_clinical_patient.tsv")
+```
+
+# Define inclusion and exclusion criteria
+
+In this project, we are focused on stage I-III colorectal cancer (CRC) patients who underwent surgical resection of the tumor and surrounding tissues, which is intended to be curative. To define which patients should be included in this cohort, we use the relevant data that was collected within 180 days of the date of the first surgery recorded in MSK-CHORD. The following criteria were used to define what patients should be included.
+
+1. Patients with a CRC diagnosis were selected.
+
+```{r}
+#| label: crc_patients
+#| echo: true
+
+crc_patients <- data_clinical_sample |> 
+  filter(CANCER_TYPE == "Colorectal Cancer") |> 
+  pull(PATIENT_ID) |> 
+  unique()
+
+length(crc_patients)
+```
+
+2. Patients who underwent surgery were selected and the date of their first surgery was identified.
+
+```{r}
+#| label: surgery_dates
+#| echo: true
+
+surgery_dates <- data_timeline_surgery |> 
+  filter(SUBTYPE == "PROCEDURE",
+         PATIENT_ID %in% crc_patients) |> 
+  group_by(PATIENT_ID) |> 
+  summarise(SURGERY_DATE = min(START_DATE))
+
+nrow(surgery_dates)
+```
+
+3. Patients who had a sample taken within 180 days of the surgery were included.
+
+```{r}
+#| label: sample_dates
+#| echo: true
+
+patients_sampled <- data_timeline_sample_acquisition |> 
+  right_join(surgery_dates,
+             by = join_by(PATIENT_ID)) |> 
+  filter(between(START_DATE - SURGERY_DATE, 
+                 -180, 180)) |> 
+  select(PATIENT_ID, 
+         SAMPLE_ID,
+         SURGERY_DATE,
+         SAMPLE_DATE = START_DATE)
+
+n_distinct(patients_sampled$PATIENT_ID)
+```
+
+4. Patients whose sample indicated a metastasis were excluded.
+
+```{r}
+#| label: exclude_metastases
+#| echo: true
+
+patients_metastatic <- data_clinical_sample |> 
+  right_join(patients_sampled,
+             by = join_by(PATIENT_ID,
+                          SAMPLE_ID)) |> 
+  filter(SAMPLE_TYPE == "Metastasis") |> 
+  pull(PATIENT_ID) |> 
+  unique()
+
+patients_included <- patients_sampled |> 
+  filter(!PATIENT_ID %in% patients_metastatic)
+
+n_distinct(patients_included$PATIENT_ID)
+```
+
+5. Patients who were diagnosed with cancers other than CRC were excluded.
+
+```{r}
+#| label: exclude_multiple_cancers
+#| echo: true
+
+patients_multiple_cancers <- patients_included |> 
+  group_by(PATIENT_ID) |> 
+  summarise(n = n()) |> 
+  filter(n > 1) |> 
+  left_join(data_clinical_sample,
+            by = join_by(PATIENT_ID)) |> 
+  filter(!CANCER_TYPE == "Colorectal Cancer") |> 
+  pull(PATIENT_ID) |> 
+  unique()
+
+patients_included <- patients_included |> 
+  filter(!PATIENT_ID %in% patients_multiple_cancers)
+
+n_distinct(patients_included$PATIENT_ID)
+```
+
+6. Patients whose sample indicates stage IV CRC were excluded, because their surgery would not be intended to be curative.
+
+```{r}
+#| label: exclude_stage_4
+#| echo: true
+
+patients_included <- data_clinical_sample |> 
+  right_join(patients_included,
+             by = join_by(PATIENT_ID, 
+                          SAMPLE_ID)) |> 
+  filter(CANCER_TYPE == "Colorectal Cancer",
+         SAMPLE_TYPE == "Primary",
+         !str_starts(PATHOLOGICAL_GROUP, 
+                     "4")) |> 
+  select(PATIENT_ID,
+         SAMPLE_ID,
+         SURGERY_DATE,
+         SAMPLE_DATE)
+
+n_distinct(patients_included$PATIENT_ID)
+```
+
+7. If a patient had imaging data from the first 6 months after the surgery, patients whose most recent scan indicates the presence of cancer were excluded, because that indicates that the surgery was not curative.
+
+```{r}
+#| label: not_cured
+#| echo: true
+
+patients_not_cured <- patients_included |> 
+  left_join(data_timeline_cancer_presence, 
+            join_by(PATIENT_ID)) |> 
+  filter(between(START_DATE - SURGERY_DATE, 
+                 0, 180)) |> 
+  group_by(PATIENT_ID) |> 
+  arrange(desc(START_DATE)) |> 
+  slice(1) |> 
+  filter(HAS_CANCER == "Y") |> 
+  pull(PATIENT_ID)
+
+patients_included <- patients_included |> 
+  filter(!PATIENT_ID %in% patients_not_cured)
+
+n_distinct(patients_included$PATIENT_ID)
+```
+
+In this project, we will investigate the disease-free survival (DFS) and overall survival (OS) from 180 days after the day of the first surgery. Therefor, we must define the relevant survival events, namely recurrence (which can be indicated by imaging or treatment) and death.
+
+```{r}
+#| label: define_survival_data
+#| echo: true
+
+# Recurrence (indicated by imaging)
+data_survival <- patients_included |> 
+  left_join(data_timeline_cancer_presence, 
+            join_by(PATIENT_ID)) |> 
+  filter(START_DATE > SURGERY_DATE + 180,
+         HAS_CANCER == "Y") |> 
+  group_by(PATIENT_ID) |> 
+  summarise(DATE_RECURRENCE = min(START_DATE)) |> 
+  right_join(patients_included, 
+             join_by(PATIENT_ID)) |> 
+  mutate(RECURRENCE = !is.na(DATE_RECURRENCE)) 
+
+# Recurrence (indicated by surgery)
+data_survival <- data_survival |> 
+  left_join(data_timeline_surgery, 
+            join_by(PATIENT_ID)) |> 
+  filter(START_DATE > SURGERY_DATE + 180,
+         SUBTYPE == "PROCEDURE") |> 
+  group_by(PATIENT_ID) |> 
+  summarise(DATE_NEXT_SURGERY = min(START_DATE)) |> 
+  right_join(data_survival, 
+             join_by(PATIENT_ID)) |> 
+  mutate(RECURRENCE = ifelse(RECURRENCE,
+                             RECURRENCE, 
+                             !is.na(DATE_NEXT_SURGERY))) 
+
+# Recurrence (indicated by treatment)
+data_survival <- data_timeline_treatment |> 
+  bind_rows(data_timeline_radiation) |> 
+  right_join(data_survival,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE > SURGERY_DATE + 180,
+         SUBTYPE %in% c("Chemo", 
+                        "Targeted", 
+                        "Radiation Therapy")) |> 
+  group_by(PATIENT_ID) |> 
+  summarise(DATE_TREATMENT = min(START_DATE)) |> 
+  left_join(data_timeline_treatment, 
+            by = join_by(PATIENT_ID)) |> 
+  filter(SUBTYPE != "Chemo" | 
+           DATE_TREATMENT - STOP_DATE > 60) |> 
+  group_by(PATIENT_ID) |> 
+  summarise(DATE_TREATMENT = min(DATE_TREATMENT)) |> 
+  right_join(data_survival, 
+             by = join_by(PATIENT_ID)) |> 
+  mutate(RECURRENCE = ifelse(RECURRENCE,
+                             RECURRENCE, 
+                             !is.na(DATE_TREATMENT)))
+
+# Death
+data_survival <- data_survival |> 
+  left_join(data_clinical_patient, 
+            join_by(PATIENT_ID)) |> 
+  filter(OS_STATUS == "1:DECEASED") |> 
+  group_by(PATIENT_ID) |> 
+  slice(1) |> 
+  select(PATIENT_ID, 
+         OS_MONTHS) |> 
+  right_join(data_survival, 
+             join_by(PATIENT_ID)) |> 
+  mutate(DEATH = !is.na(OS_MONTHS),
+         DATE_DEATH = round(OS_MONTHS*30.44)) |> 
+  select(-OS_MONTHS)
+
+# Censoring
+data_survival <- data_survival |> 
+  left_join(data_clinical_patient, 
+            join_by(PATIENT_ID))|> 
+  group_by(PATIENT_ID) |> 
+  mutate(OS_STATUS = ifelse(DEATH == FALSE, 
+                            0, 
+                            1),
+         DFS_STATUS = ifelse(RECURRENCE == FALSE & 
+                               DEATH == FALSE, 
+                             0, 
+                             1),
+         OS_DATE = round(OS_MONTHS*30.44),
+         DFS_DATE = ifelse(DFS_STATUS == 1, 
+                           pmin(DATE_RECURRENCE, 
+                                DATE_DEATH, 
+                                na.rm = TRUE), 
+                           OS_DATE),
+         DAYS_TO_OS_EVENT = OS_DATE - SURGERY_DATE,
+         DAYS_TO_DFS_EVENT = DFS_DATE - SURGERY_DATE,
+         YEARS_TO_OS_EVENT = DAYS_TO_OS_EVENT/365.25, 
+         YEARS_TO_DFS_EVENT = DAYS_TO_DFS_EVENT/365.25) |> 
+  select(PATIENT_ID, 
+         SAMPLE_ID,
+         SURGERY_DATE,
+         SAMPLE_DATE,
+         OS_STATUS, 
+         DAYS_TO_OS_EVENT, 
+         YEARS_TO_OS_EVENT, 
+         DFS_STATUS, 
+         DAYS_TO_DFS_EVENT, 
+         YEARS_TO_DFS_EVENT)
+```
+
+8. Only patients survived without recurrence or death for 180 days after the surgery were included.
+
+```{r}
+#| label: exclude_no_DFS_180_days
+#| echo: true
+
+patients_included <- data_survival |> 
+  mutate(survived_6_months = case_when(OS_STATUS == 1 ~ DAYS_TO_OS_EVENT > 180,
+                                       TRUE ~ TRUE),
+         no_recurrence_6_months = case_when(DFS_STATUS == 1 ~ DAYS_TO_DFS_EVENT > 180,
+                                            TRUE ~ TRUE)) |> 
+  filter(survived_6_months == TRUE,
+         no_recurrence_6_months == TRUE) |> 
+  select(- c(survived_6_months,
+             no_recurrence_6_months))
+
+n_distinct(patients_included$PATIENT_ID)
+```
+
+# Split data
+
+The data will be split 80/20 into a training and testing set, controlling for their survival status.
+
+```{r}
+#| label: split_data
+#| echo: true
+
+split <- patients_included |> 
+  mutate(strata = interaction(OS_STATUS,
+                              DFS_STATUS)) |> 
+  initial_split(prop = 0.8, 
+                strata = strata)
+
+data_train <- training(split) |> 
+  select(-strata)
+
+data_test <- testing(split) |> 
+  select(-strata)
+
+print(str_c("# patients in training set: ", 
+            nrow(data_train)))
+
+print(str_c("# patients in test set: ", 
+            nrow(data_test)))
+
+write_tsv(x = data_train,
+          file = "../data/02_data_train.tsv")
+
+write_tsv(x = data_test,
+          file = "../data/02_data_test.tsv")
+```

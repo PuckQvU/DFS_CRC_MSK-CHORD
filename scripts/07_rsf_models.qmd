@@ -1,0 +1,861 @@
+---
+title: "Random survival forest models"
+author: "Puck Quarles van Ufford"
+date: today
+format: html
+---
+
+# Set up
+
+```{r}
+#| label: packages
+#| message: false
+#| echo: true
+
+library("tidyverse")
+library("randomForestSRC")
+library("caret")
+library("survival")
+```
+
+```{r}
+#| label: seed
+#| echo: true
+
+set.seed(8)
+```
+
+# Load data
+
+```{r}
+#| label: load_data
+#| message: false
+#| echo: true
+
+data_os <- read_tsv(file = "../data/03_data_train_os.tsv")
+data_os_noNLP <- read_tsv(file = "../data/03_data_train_os_noNLP.tsv")
+data_os_nogenomic <- read_tsv(file = "../data/03_data_train_os_nogenomic.tsv")
+data_os_noNLPgenomic <- read_tsv(file = "../data/03_data_train_os_noNLPgenomic.tsv")
+
+data_dfs <- read_tsv(file = "../data/03_data_train_dfs.tsv")
+data_dfs_noNLP <- read_tsv(file = "../data/03_data_train_dfs_noNLP.tsv")
+data_dfs_nogenomic <- read_tsv(file = "../data/03_data_train_dfs_nogenomic.tsv")
+data_dfs_noNLPgenomic <- read_tsv(file = "../data/03_data_train_dfs_noNLPgenomic.tsv")
+```
+
+# Settings
+
+```{r}
+#| label: settings
+#| echo: true
+
+trees <- 1000
+
+rule <- "logrankscore" # logrank (default), bs.gradient, or logrankscore
+
+tree_grid <- c(1, seq(50, trees, by = 50))
+```
+
+# Set up cross-validation
+
+```{r}
+#| label: 5_fold_CV
+#| echo: true
+
+folds_os <- createFolds(data_os$os_status,
+                        k = 5,
+                        list = TRUE,
+                        returnTrain = FALSE)
+folds_os_noNLP <- createFolds(data_os_noNLP$os_status,
+                              k = 5,
+                              list = TRUE,
+                              returnTrain = FALSE)
+folds_os_nogenomic <- createFolds(data_os_nogenomic$os_status,
+                                  k = 5,
+                                  list = TRUE,
+                                  returnTrain = FALSE)
+folds_os_noNLPgenomic <- createFolds(data_os_noNLPgenomic$os_status,
+                                     k = 5,
+                                     list = TRUE,
+                                     returnTrain = FALSE)
+
+folds_dfs <- createFolds(data_dfs$dfs_status,
+                         k = 5,
+                         list = TRUE,
+                         returnTrain = FALSE)
+folds_dfs_noNLP <- createFolds(data_dfs_noNLP$dfs_status,
+                               k = 5,
+                               list = TRUE,
+                               returnTrain = FALSE)
+folds_dfs_nogenomic <- createFolds(data_dfs_nogenomic$dfs_status,
+                                   k = 5,
+                                   list = TRUE,
+                                   returnTrain = FALSE)
+folds_dfs_noNLPgenomic <- createFolds(data_dfs_noNLPgenomic$dfs_status,
+                                      k = 5,
+                                      list = TRUE,
+                                      returnTrain = FALSE)
+```
+
+# Predicting OS
+
+## All features
+
+```{r}
+#| label: predict_os
+#| echo: true
+#| warning: false
+
+rsf_res_os <- map_dfr(tree_grid,
+                      function(trees) {
+
+    fold_c <- map_dbl(folds_os,
+                      ~ {
+                        
+        data <- data_os |> 
+          select(- c(patient_id,
+                     sample_id))
+                        
+        test_idx  <- .x
+        train_idx <- setdiff(seq_len(nrow(data)), 
+                             test_idx)
+
+        train_data <- data[train_idx, ]
+        test_data  <- data[test_idx, ]
+
+        fit <- rfsrc(Surv(years_to_os_event, 
+                          os_status) ~ .,
+                     data = train_data,
+                     ntree = trees,
+                     splitrule = rule)
+
+        pred <- predict(fit, 
+                        newdata = test_data)
+        
+        risk <- -pred$predicted
+
+        concordance(Surv(test_data$years_to_os_event, 
+                         test_data$os_status) ~ risk)$concordance
+      }
+    )
+
+    tibble(trees = trees,
+           c_fold_1 = fold_c[1],
+           c_fold_2 = fold_c[2],
+           c_fold_3 = fold_c[3],
+           c_fold_4 = fold_c[4],
+           c_fold_5 = fold_c[5])
+  }
+)
+
+summary_os <- rsf_res_os |> 
+  pivot_longer(cols = -trees,
+               names_to = "fold",
+               values_to = "c_index") |> 
+  group_by(trees) |> 
+  summarise(mean_c_index = mean(c_index),
+            sd_c_index = sd(c_index),
+            lower_95 = quantile(c_index, 0.025),
+            upper_95 = quantile(c_index, 0.975),
+            .groups = "drop") 
+
+summary_os |> 
+  ggplot(mapping = aes(x = trees, 
+                       y = mean_c_index)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower_95, 
+                  ymax = upper_95),
+              alpha = 0.2) +
+  labs(
+    x = "Number of trees",
+    y = "C-index (95% CI)",
+    title = "Random survival forest model (OS)",
+    subtitle = "Feature sets included: all") +
+  theme_minimal()
+
+ggsave(paste0("../results/07_tree_plot_OS_",
+              rule,
+              ".png"))
+
+final_os <- summary_os |> 
+  filter(trees == max(trees)) |> 
+  mutate(model = "RSF",
+         features = "all",
+         outcome = "OS",
+         rule = rule) |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, rule))
+
+final_os
+
+write_tsv(final_os,
+          file = "../results/07_rsf_models_results.tsv",
+          append = TRUE)
+```
+
+## No NLP data
+
+```{r}
+#| label: predict_os_noNLP
+#| echo: true
+#| warning: false
+
+rsf_res_os_noNLP <- map_dfr(tree_grid,
+                            function(trees) {
+
+    fold_c <- map_dbl(folds_os_noNLP,
+                      ~ {
+                        
+        data <- data_os_noNLP |> 
+          select(- c(patient_id,
+                     sample_id))
+                        
+        test_idx  <- .x
+        train_idx <- setdiff(seq_len(nrow(data)), 
+                             test_idx)
+
+        train_data <- data[train_idx, ]
+        test_data  <- data[test_idx, ]
+
+        fit <- rfsrc(Surv(years_to_os_event, 
+                          os_status) ~ .,
+                     data = train_data,
+                     ntree = trees,
+                     splitrule = rule)
+
+        pred <- predict(fit, 
+                        newdata = test_data)
+        
+        risk <- -pred$predicted
+
+        concordance(Surv(test_data$years_to_os_event, 
+                         test_data$os_status) ~ risk)$concordance
+      }
+    )
+
+    tibble(trees = trees,
+           c_fold_1 = fold_c[1],
+           c_fold_2 = fold_c[2],
+           c_fold_3 = fold_c[3],
+           c_fold_4 = fold_c[4],
+           c_fold_5 = fold_c[5])
+  }
+)
+
+summary_os_noNLP  <- rsf_res_os_noNLP  |> 
+  pivot_longer(cols = -trees,
+               names_to = "fold",
+               values_to = "c_index") |> 
+  group_by(trees) |> 
+  summarise(mean_c_index = mean(c_index),
+            sd_c_index = sd(c_index),
+            lower_95 = quantile(c_index, 0.025),
+            upper_95 = quantile(c_index, 0.975),
+            .groups = "drop") 
+
+summary_os_noNLP  |> 
+  ggplot(mapping = aes(x = trees, 
+                       y = mean_c_index)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower_95, 
+                  ymax = upper_95),
+              alpha = 0.2) +
+  labs(
+    x = "Number of trees",
+    y = "C-index (95% CI)",
+    title = "Random survival forest model (OS)",
+    subtitle = "Feature sets included: no NLP") +
+  theme_minimal()
+
+ggsave(paste0("../results/07_tree_plot_OS_noNLP_",
+              rule,
+              ".png"))
+
+final_os_noNLP  <- summary_os_noNLP  |> 
+  filter(trees == max(trees)) |> 
+  mutate(model = "RSF",
+         features = "noNLP",
+         outcome = "OS",
+         rule = rule) |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, rule))
+
+final_os_noNLP 
+
+write_tsv(final_os_noNLP,
+          file = "../results/07_rsf_models_results.tsv",
+          append = TRUE)
+```
+
+## No genomic data
+
+```{r}
+#| label: predict_os_nogenomic
+#| echo: true
+#| warning: false
+
+rsf_res_os_nogenomic <- map_dfr(tree_grid,
+                                 function(trees) {
+
+    fold_c <- map_dbl(folds_os_nogenomic,
+                      ~ {
+                        
+        data <- data_os_nogenomic |> 
+          select(- c(patient_id,
+                     sample_id))
+                        
+        test_idx  <- .x
+        train_idx <- setdiff(seq_len(nrow(data)), 
+                             test_idx)
+
+        train_data <- data[train_idx, ]
+        test_data  <- data[test_idx, ]
+
+        fit <- rfsrc(Surv(years_to_os_event, 
+                          os_status) ~ .,
+                     data = train_data,
+                     ntree = trees,
+                     splitrule = rule)
+
+        pred <- predict(fit, 
+                        newdata = test_data)
+        
+        risk <- -pred$predicted
+
+        concordance(Surv(test_data$years_to_os_event, 
+                         test_data$os_status) ~ risk)$concordance
+      }
+    )
+
+    tibble(trees = trees,
+           c_fold_1 = fold_c[1],
+           c_fold_2 = fold_c[2],
+           c_fold_3 = fold_c[3],
+           c_fold_4 = fold_c[4],
+           c_fold_5 = fold_c[5])
+  }
+)
+
+summary_os_nogenomic  <- rsf_res_os_nogenomic  |> 
+  pivot_longer(cols = -trees,
+               names_to = "fold",
+               values_to = "c_index") |> 
+  group_by(trees) |> 
+  summarise(mean_c_index = mean(c_index),
+            sd_c_index = sd(c_index),
+            lower_95 = quantile(c_index, 0.025),
+            upper_95 = quantile(c_index, 0.975),
+            .groups = "drop") 
+
+summary_os_nogenomic  |> 
+  ggplot(mapping = aes(x = trees, 
+                       y = mean_c_index)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower_95, 
+                  ymax = upper_95),
+              alpha = 0.2) +
+  labs(
+    x = "Number of trees",
+    y = "C-index (95% CI)",
+    title = "Random survival forest model (OS)",
+    subtitle = "Feature sets included: no genomic") +
+  theme_minimal()
+
+ggsave(paste0("../results/07_tree_plot_OS_nogenomic_",
+              rule,
+              ".png"))
+
+final_os_nogenomic  <- summary_os_nogenomic  |> 
+  filter(trees == max(trees)) |> 
+  mutate(model = "RSF",
+         features = "nogenomic",
+         outcome = "OS",
+         rule = rule) |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, rule))
+
+final_os_nogenomic 
+
+write_tsv(final_os_nogenomic,
+          file = "../results/07_rsf_models_results.tsv",
+          append = TRUE)
+```
+
+## Only routine data
+
+```{r}
+#| label: predict_os_noNLPgenomic
+#| echo: true
+#| warning: false
+
+rsf_res_os_noNLPgenomic <- map_dfr(tree_grid,
+                                    function(trees) {
+
+    fold_c <- map_dbl(folds_os_noNLPgenomic,
+                      ~ {
+                        
+        data <- data_os_noNLPgenomic |> 
+          select(- c(patient_id,
+                     sample_id))
+                        
+        test_idx  <- .x
+        train_idx <- setdiff(seq_len(nrow(data)), 
+                             test_idx)
+
+        train_data <- data[train_idx, ]
+        test_data  <- data[test_idx, ]
+
+        fit <- rfsrc(Surv(years_to_os_event, 
+                          os_status) ~ .,
+                     data = train_data,
+                     ntree = trees,
+                     splitrule = rule)
+
+        pred <- predict(fit, 
+                        newdata = test_data)
+        
+        risk <- -pred$predicted
+
+        concordance(Surv(test_data$years_to_os_event, 
+                         test_data$os_status) ~ risk)$concordance
+      }
+    )
+
+    tibble(trees = trees,
+           c_fold_1 = fold_c[1],
+           c_fold_2 = fold_c[2],
+           c_fold_3 = fold_c[3],
+           c_fold_4 = fold_c[4],
+           c_fold_5 = fold_c[5])
+  }
+)
+
+summary_os_noNLPgenomic  <- rsf_res_os_noNLPgenomic  |> 
+  pivot_longer(cols = -trees,
+               names_to = "fold",
+               values_to = "c_index") |> 
+  group_by(trees) |> 
+  summarise(mean_c_index = mean(c_index),
+            sd_c_index = sd(c_index),
+            lower_95 = quantile(c_index, 0.025),
+            upper_95 = quantile(c_index, 0.975),
+            .groups = "drop") 
+
+summary_os_noNLPgenomic  |> 
+  ggplot(mapping = aes(x = trees, 
+                       y = mean_c_index)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower_95, 
+                  ymax = upper_95),
+              alpha = 0.2) +
+  labs(
+    x = "Number of trees",
+    y = "C-index (95% CI)",
+    title = "Random survival forest model (OS)",
+    subtitle = "Feature sets included: no NLP or genomic") +
+  theme_minimal()
+
+ggsave(paste0("../results/07_tree_plot_OS_noNLPgenomic_",
+              rule,
+              ".png"))
+
+final_os_noNLPgenomic  <- summary_os_noNLPgenomic  |> 
+  filter(trees == max(trees)) |> 
+  mutate(model = "RSF",
+         features = "noNLPgenomic",
+         outcome = "OS",
+         rule = rule) |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, rule))
+
+final_os_noNLPgenomic 
+
+write_tsv(final_os_noNLPgenomic,
+          file = "../results/07_rsf_models_results.tsv",
+          append = TRUE)
+```
+# Predicting DFS
+
+## All features
+
+```{r}
+#| label: predict_dfs
+#| echo: true
+#| warning: false
+
+rsf_res_dfs <- map_dfr(tree_grid,
+                       function(trees) {
+
+    fold_c <- map_dbl(folds_dfs,
+                      ~ {
+                        
+        data <- data_dfs |> 
+          select(- c(patient_id,
+                     sample_id))
+                        
+        test_idx  <- .x
+        train_idx <- setdiff(seq_len(nrow(data)), 
+                             test_idx)
+
+        train_data <- data[train_idx, ]
+        test_data  <- data[test_idx, ]
+
+        fit <- rfsrc(Surv(years_to_dfs_event, 
+                          dfs_status) ~ .,
+                     data = train_data,
+                     ntree = trees,
+                     splitrule = rule)
+
+        pred <- predict(fit, 
+                        newdata = test_data)
+        
+        risk <- -pred$predicted
+
+        concordance(Surv(test_data$years_to_dfs_event, 
+                         test_data$dfs_status) ~ risk)$concordance
+      }
+    )
+
+    tibble(trees = trees,
+           c_fold_1 = fold_c[1],
+           c_fold_2 = fold_c[2],
+           c_fold_3 = fold_c[3],
+           c_fold_4 = fold_c[4],
+           c_fold_5 = fold_c[5])
+  }
+)
+
+summary_dfs <- rsf_res_dfs |> 
+  pivot_longer(cols = -trees,
+               names_to = "fold",
+               values_to = "c_index") |> 
+  group_by(trees) |> 
+  summarise(mean_c_index = mean(c_index),
+            sd_c_index = sd(c_index),
+            lower_95 = quantile(c_index, 0.025),
+            upper_95 = quantile(c_index, 0.975),
+            .groups = "drop") 
+
+summary_dfs |> 
+  ggplot(mapping = aes(x = trees, 
+                       y = mean_c_index)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower_95, 
+                  ymax = upper_95),
+              alpha = 0.2) +
+  labs(
+    x = "Number of trees",
+    y = "C-index (95% CI)",
+    title = "Random survival forest model (DFS)",
+    subtitle = "Feature sets included: all") +
+  theme_minimal()
+
+ggsave(paste0("../results/07_tree_plot_DFS_",
+              rule,
+              ".png"))
+
+final_dfs <- summary_dfs |> 
+  filter(trees == max(trees)) |> 
+  mutate(model = "RSF",
+         features = "all",
+         outcome = "DFS",
+         rule = rule) |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, rule))
+
+final_dfs
+
+write_tsv(final_dfs,
+          file = "../results/07_rsf_models_results.tsv",
+          append = TRUE)
+```
+
+## No NLP data
+
+```{r}
+#| label: predict_dfs_noNLP
+#| echo: true
+#| warning: false
+
+rsf_res_dfs_noNLP <- map_dfr(tree_grid,
+                             function(trees) {
+
+    fold_c <- map_dbl(folds_dfs_noNLP,
+                      ~ {
+                        
+        data <- data_dfs_noNLP |> 
+          select(- c(patient_id,
+                     sample_id))
+                        
+        test_idx  <- .x
+        train_idx <- setdiff(seq_len(nrow(data)), 
+                             test_idx)
+
+        train_data <- data[train_idx, ]
+        test_data  <- data[test_idx, ]
+
+        fit <- rfsrc(Surv(years_to_dfs_event, 
+                          dfs_status) ~ .,
+                     data = train_data,
+                     ntree = trees,
+                     splitrule = rule)
+
+        pred <- predict(fit, 
+                        newdata = test_data)
+        
+        risk <- -pred$predicted
+
+        concordance(Surv(test_data$years_to_dfs_event, 
+                         test_data$dfs_status) ~ risk)$concordance
+      }
+    )
+
+    tibble(trees = trees,
+           c_fold_1 = fold_c[1],
+           c_fold_2 = fold_c[2],
+           c_fold_3 = fold_c[3],
+           c_fold_4 = fold_c[4],
+           c_fold_5 = fold_c[5])
+  }
+)
+
+summary_dfs_noNLP  <- rsf_res_dfs_noNLP  |> 
+  pivot_longer(cols = -trees,
+               names_to = "fold",
+               values_to = "c_index") |> 
+  group_by(trees) |> 
+  summarise(mean_c_index = mean(c_index),
+            sd_c_index = sd(c_index),
+            lower_95 = quantile(c_index, 0.025),
+            upper_95 = quantile(c_index, 0.975),
+            .groups = "drop") 
+
+summary_dfs_noNLP  |> 
+  ggplot(mapping = aes(x = trees, 
+                       y = mean_c_index)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower_95, 
+                  ymax = upper_95),
+              alpha = 0.2) +
+  labs(
+    x = "Number of trees",
+    y = "C-index (95% CI)",
+    title = "Random survival forest model (DFS)",
+    subtitle = "Feature sets included: no NLP") +
+  theme_minimal()
+
+ggsave(paste0("../results/07_tree_plot_DFS_noNLP_",
+              rule,
+              ".png"))
+
+final_dfs_noNLP  <- summary_dfs_noNLP  |> 
+  filter(trees == max(trees)) |> 
+  mutate(model = "RSF",
+         features = "noNLP",
+         outcome = "DFS",
+         rule = rule) |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, rule))
+
+final_dfs_noNLP 
+
+write_tsv(final_dfs_noNLP,
+          file = "../results/07_rsf_models_results.tsv",
+          append = TRUE)
+```
+
+## No genomic data
+
+```{r}
+#| label: predict_dfs_nogenomic
+#| echo: true
+#| warning: false
+
+rsf_res_dfs_nogenomic <- map_dfr(tree_grid,
+                                  function(trees) {
+
+    fold_c <- map_dbl(folds_dfs_nogenomic,
+                      ~ {
+                        
+        data <- data_dfs_nogenomic |> 
+          select(- c(patient_id,
+                     sample_id))
+                        
+        test_idx  <- .x
+        train_idx <- setdiff(seq_len(nrow(data)), 
+                             test_idx)
+
+        train_data <- data[train_idx, ]
+        test_data  <- data[test_idx, ]
+
+        fit <- rfsrc(Surv(years_to_dfs_event, 
+                          dfs_status) ~ .,
+                     data = train_data,
+                     ntree = trees,
+                     splitrule = rule)
+
+        pred <- predict(fit, 
+                        newdata = test_data)
+        
+        risk <- -pred$predicted
+
+        concordance(Surv(test_data$years_to_dfs_event, 
+                         test_data$dfs_status) ~ risk)$concordance
+      }
+    )
+
+    tibble(trees = trees,
+           c_fold_1 = fold_c[1],
+           c_fold_2 = fold_c[2],
+           c_fold_3 = fold_c[3],
+           c_fold_4 = fold_c[4],
+           c_fold_5 = fold_c[5])
+  }
+)
+
+summary_dfs_nogenomic  <- rsf_res_dfs_nogenomic  |> 
+  pivot_longer(cols = -trees,
+               names_to = "fold",
+               values_to = "c_index") |> 
+  group_by(trees) |> 
+  summarise(mean_c_index = mean(c_index),
+            sd_c_index = sd(c_index),
+            lower_95 = quantile(c_index, 0.025),
+            upper_95 = quantile(c_index, 0.975),
+            .groups = "drop") 
+
+summary_dfs_nogenomic  |> 
+  ggplot(mapping = aes(x = trees, 
+                       y = mean_c_index)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower_95, 
+                  ymax = upper_95),
+              alpha = 0.2) +
+  labs(
+    x = "Number of trees",
+    y = "C-index (95% CI)",
+    title = "Random survival forest model (DFS)",
+    subtitle = "Feature sets included: no genomic") +
+  theme_minimal()
+
+ggsave(paste0("../results/07_tree_plot_DFS_nogenomic_",
+              rule,
+              ".png"))
+
+final_dfs_nogenomic  <- summary_dfs_nogenomic  |> 
+  filter(trees == max(trees)) |> 
+  mutate(model = "RSF",
+         features = "nogenomic",
+         outcome = "DFS",
+         rule = rule) |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, rule))
+
+final_dfs_nogenomic 
+
+write_tsv(final_dfs_nogenomic,
+          file = "../results/07_rsf_models_results.tsv",
+          append = TRUE)
+```
+
+## Only routine data
+
+```{r}
+#| label: predict_dfs_noNLPgenomic
+#| echo: true
+#| warning: false
+
+rsf_res_dfs_noNLPgenomic <- map_dfr(tree_grid,
+                                     function(trees) {
+
+    fold_c <- map_dbl(folds_dfs_noNLPgenomic,
+                      ~ {
+                        
+        data <- data_dfs_noNLPgenomic |> 
+          select(- c(patient_id,
+                     sample_id))
+                        
+        test_idx  <- .x
+        train_idx <- setdiff(seq_len(nrow(data)), 
+                             test_idx)
+
+        train_data <- data[train_idx, ]
+        test_data  <- data[test_idx, ]
+
+        fit <- rfsrc(Surv(years_to_dfs_event, 
+                          dfs_status) ~ .,
+                     data = train_data,
+                     ntree = trees,
+                     splitrule = rule)
+
+        pred <- predict(fit, 
+                        newdata = test_data)
+        
+        risk <- -pred$predicted
+
+        concordance(Surv(test_data$years_to_dfs_event, 
+                         test_data$dfs_status) ~ risk)$concordance
+      }
+    )
+
+    tibble(trees = trees,
+           c_fold_1 = fold_c[1],
+           c_fold_2 = fold_c[2],
+           c_fold_3 = fold_c[3],
+           c_fold_4 = fold_c[4],
+           c_fold_5 = fold_c[5])
+  }
+)
+
+summary_dfs_noNLPgenomic  <- rsf_res_dfs_noNLPgenomic  |> 
+  pivot_longer(cols = -trees,
+               names_to = "fold",
+               values_to = "c_index") |> 
+  group_by(trees) |> 
+  summarise(mean_c_index = mean(c_index),
+            sd_c_index = sd(c_index),
+            lower_95 = quantile(c_index, 0.025),
+            upper_95 = quantile(c_index, 0.975),
+            .groups = "drop") 
+
+summary_dfs_noNLPgenomic  |> 
+  ggplot(mapping = aes(x = trees, 
+                       y = mean_c_index)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower_95, 
+                  ymax = upper_95),
+              alpha = 0.2) +
+  labs(
+    x = "Number of trees",
+    y = "C-index (95% CI)",
+    title = "Random survival forest model (DFS)",
+    subtitle = "Feature sets included: no NLP or genomic") +
+  theme_minimal()
+
+ggsave(paste0("../results/07_tree_plot_DFS_noNLPgenomic_",
+              rule,
+              ".png"))
+
+final_dfs_noNLPgenomic  <- summary_dfs_noNLPgenomic  |> 
+  filter(trees == max(trees)) |> 
+  mutate(model = "RSF",
+         features = "noNLPgenomic",
+         outcome = "DFS",
+         rule = rule) |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, rule))
+
+final_dfs_noNLPgenomic 
+
+write_tsv(final_dfs_noNLPgenomic,
+          file = "../results/07_rsf_models_results.tsv",
+          append = TRUE)
+```

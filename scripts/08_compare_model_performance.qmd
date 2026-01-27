@@ -1,0 +1,240 @@
+---
+title: "Compare model performance"
+author: "Puck Quarles van Ufford"
+date: today
+format: html
+---
+
+# Set up
+
+```{r}
+#| label: packages
+#| message: false
+#| echo: true
+
+library("tidyverse")
+```
+
+# Load results
+
+```{r}
+#| label: load_results
+#| message: false
+#| echo: true
+
+results_cox <- read_tsv("../results/05_cox_models_results.tsv", 
+                        col_names = c("model", "features", "outcome",
+                                      "mean_c_index", "sd_c_index",
+                                      "lower_95", "upper_95",
+                                      "method"))
+
+results_stepwise_cox_100 <- read_tsv("../results/06_stepwise_cox_models_results_100_max.tsv",
+                                     col_names = c("model", "features", "outcome",
+                                                   "mean_c_index", "sd_c_index",
+                                                   "lower_95", "upper_95",
+                                                   "n_features"))
+
+results_stepwise_cox_50 <- read_tsv("../results/06_stepwise_cox_models_results_50_max.tsv",
+                                    col_names = c("model", "features", "outcome",
+                                                  "mean_c_index", "sd_c_index",
+                                                  "lower_95", "upper_95",
+                                                  "n_features"))
+
+results_stepwise_cox_25 <- read_tsv("../results/06_stepwise_cox_models_results_25_max.tsv",
+                                    col_names = c("model", "features", "outcome",
+                                                  "mean_c_index", "sd_c_index",
+                                                  "lower_95", "upper_95",
+                                                  "n_features"))
+
+results_rsf <- read_tsv("../results/07_rsf_models_results.tsv", 
+                        col_names = c("model", "features", "outcome",
+                                      "mean_c_index", "sd_c_index", 
+                                      "lower_95", "upper_95", 
+                                      "split_rule"))
+```
+
+Combine Cox results.
+
+```{r}
+#| label: combine_cox_results
+#| message: false
+#| echo: true
+
+results_all_cox <- results_stepwise_cox_100 |> 
+  mutate(method = "forward-stepwise") |> 
+  bind_rows(results_cox)
+```
+
+# Summarize results
+
+Compare C-indeces across different Cox models.
+
+```{r}
+#| label: cox_c_indeces
+#| message: false
+#| echo: true
+
+results_all_cox |> 
+  mutate(outcome = factor(outcome, 
+                          levels = c("OS", 
+                                     "DFS"))) |> 
+  ggplot(mapping = aes(x = features,
+                       y = mean_c_index,
+                       color = method)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = lower_95, 
+                    ymax = upper_95),
+                width = 0.2,
+                alpha = 0.5,
+                position = position_dodge(width = 0.5)) +
+  labs(x = "Types of features included",
+       y = "C-index (95% CI)",
+       title = "Concordance of Cox models",
+       color = "Feature selection method") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  guides(color = guide_legend(nrow = 2)) + 
+  ylim(0.3, 1) +
+  facet_wrap(~ outcome, 
+             nrow = 2)
+  
+ggsave("../results/08_C_indeces_cox.png",
+       width = 6.5,
+       height = 8,
+       units = "in")
+```
+
+Compare C-indeces across different RSF models.
+
+```{r}
+#| label: rsf_c_indeces
+#| message: false
+#| echo: true
+
+results_rsf |> 
+  mutate(outcome = factor(outcome, 
+                          levels = c("OS", 
+                                     "DFS")),
+         split_rule = factor(split_rule, 
+                             levels = c("logrank", 
+                                        "logrankscore", 
+                                        "bs.gradient"))) |> 
+  ggplot(mapping = aes(x = features,
+                       y = mean_c_index,
+                       color = split_rule)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = lower_95, 
+                    ymax = upper_95),
+                width = 0.2,
+                alpha = 0.5,
+                position = position_dodge(width = 0.5)) +
+  labs(x = "Types of features included",
+       y = "C-index (95% CI)",
+       title = "Concordance of RSF models",
+       color = "Tree splitting rule") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  guides(color = guide_legend(nrow = 2)) +
+  ylim(0.3, 1) +
+  facet_wrap(~ outcome, 
+             nrow = 2)
+  
+ggsave("../results/08_C_indeces_rsf.png",
+       width = 6.5,
+       height = 8,
+       units = "in")
+```
+
+# Compare forward Cox 
+
+```{r}
+#| label: compare_forward_cox_max_iterations
+#| message: false
+#| echo: true
+
+results_stepwise_cox_compared <- results_stepwise_cox_50 |> 
+  mutate(max_iterations = "50") 
+
+results_stepwise_cox_compared <- results_stepwise_cox_25 |> 
+  mutate(max_iterations = "25") |> 
+  bind_rows(results_stepwise_cox_compared)
+
+results_stepwise_cox_compared <- results_stepwise_cox_100 |> 
+  mutate(max_iterations = "100") |> 
+  bind_rows(results_stepwise_cox_compared)
+
+results_stepwise_cox_compared |> 
+  mutate(outcome = factor(outcome, 
+                          levels = c("OS", 
+                                     "DFS")),
+         max_iterations = factor(max_iterations, 
+                                 levels = c("25", 
+                                            "50",
+                                            "100"))) |> 
+  ggplot(mapping = aes(x = features,
+                       y = mean_c_index,
+                       color = max_iterations)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = lower_95, 
+                    ymax = upper_95),
+                width = 0.2,
+                alpha = 0.5,
+                position = position_dodge(width = 0.5)) +
+  labs(x = "Types of features included",
+       y = "C-index (95% CI)",
+       title = "Comparing concordance of forward stepwise Cox models",
+       color = "Maximum number of iterations") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  facet_wrap(~ outcome, 
+             ncol = 2)
+
+ggsave("../results/08_cox_model_iterations.png")
+```
+
+# Compare all models
+
+Only using the logrank splitting rule for RSF, since it is the default and there is no significant difference between the models
+
+```{r}
+#| label: compare_all_methods
+#| message: false
+#| echo: true
+
+all_models <- results_rsf |> 
+  filter(split_rule == "logrank") |> 
+  mutate(label = "RSF")
+
+all_models <- results_all_cox |> 
+  mutate(label = case_when(method == "classic" ~ "Classic Cox",
+                           method == "lasso" ~ "Lasso-regularized Cox",
+                           method == "elastic-net" ~ "Elastic-net-regularized Cox",
+                           method == "prevalence_filter" ~ "Classic Cox on prevalence-filtered features",
+                           method == "forward-stepwise" ~ "Forward stepwise Cox")) |> 
+  bind_rows(all_models)
+
+all_models |> 
+  mutate(outcome = factor(outcome, 
+                          levels = c("OS", 
+                                     "DFS"))) |> 
+  ggplot(mapping = aes(x = features,
+                       y = mean_c_index,
+                       color = label)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = lower_95, 
+                    ymax = upper_95),
+                width = 0.2,
+                alpha = 0.5,
+                position = position_dodge(width = 0.5)) +
+  labs(x = "Types of features included",
+       y = "C-index (95% CI)",
+       title = "Comparing C-index across models",
+       color = "Model") +
+  theme_minimal() +
+  theme(legend.position = "right")  +
+  guides(color = guide_legend(nrow = 6)) +
+  facet_wrap(~ outcome, 
+             nrow = 2)
+
+ggsave("../results/08_C_indeces.png")
+```

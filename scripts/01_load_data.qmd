@@ -1,13 +1,16 @@
 ---
 title: "Load MSK-CHORD data"
 author: "Puck Quarles van Ufford"
+date: today
 format: html
 ---
+
+# Set up
 
 ```{r}
 #| label: packages
 #| message: false
-#| echo: false
+#| echo: true
 
 library("tidyverse")
 ```
@@ -17,6 +20,7 @@ library("tidyverse")
 ```{r}
 #| label: list_files
 #| warning: false
+#| echo: true
 
 untar(tarfile = "../data/_raw/msk_chord_2024.tar.gz",
       exdir = "../data/_raw/")
@@ -30,14 +34,15 @@ Every data set in this folder has a data file and an accompanying meta file.
 
 # Load data
 
-## clinical_patient
+## Clinical patient
 
 ```{r}
 #| label: load_clinical_patient
 #| message: false
 #| warning: false
+#| echo: true
 
-data_clinical_patient <- read_delim("../data/_raw/msk_chord_2024/data_clinical_patient.txt", 
+data_clinical_patient <- read_delim(file = "../data/_raw/msk_chord_2024/data_clinical_patient.txt", 
                                     delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_clinical_patient.txt")
@@ -45,7 +50,7 @@ readLines("../data/_raw/msk_chord_2024/meta_clinical_patient.txt")
 head(data_clinical_patient) 
 
 # Remove 4 rows of column descriptions
-data_clinical_patient <- read_delim("../data/_raw/msk_chord_2024/data_clinical_patient.txt", 
+data_clinical_patient <- read_delim(file = "../data/_raw/msk_chord_2024/data_clinical_patient.txt", 
                                     delim = "\t", 
                                     skip = 4)
 
@@ -55,14 +60,15 @@ write_tsv(x = data_clinical_patient,
           file = "../data/01_data_clinical_patient.tsv")
 ```
 
-## clinical_sample
+## Clinical sample
 
 ```{r}
 #| label: load_clinical_sample
 #| message: false
 #| warning: false
+#| echo: true
 
-data_clinical_sample <- read_delim("../data/_raw/msk_chord_2024/data_clinical_sample.txt", 
+data_clinical_sample <- read_delim(file = "../data/_raw/msk_chord_2024/data_clinical_sample.txt", 
                                    delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_clinical_sample.txt")
@@ -70,7 +76,7 @@ readLines("../data/_raw/msk_chord_2024/meta_clinical_sample.txt")
 head(data_clinical_sample) 
 
 # Remove 4 rows of column descriptions
-data_clinical_sample <- read_delim("../data/_raw/msk_chord_2024/data_clinical_sample.txt",
+data_clinical_sample <- read_delim(file = "../data/_raw/msk_chord_2024/data_clinical_sample.txt",
                                    delim = "\t", 
                                    skip = 4)
 
@@ -80,14 +86,15 @@ write_tsv(x = data_clinical_sample,
           file = "../data/01_data_clinical_sample.tsv")
 ```
 
-## cna_hg19
+## CNA hg19
 
 ```{r}
 #| label: load_cna_hg19
 #| message: false
 #| warning: false
+#| echo: true
 
-data_cna_hg19 <- read_delim("../data/_raw/msk_chord_2024/data_cna_hg19.seg",
+data_cna_hg19 <- read_delim(file = "../data/_raw/msk_chord_2024/data_cna_hg19.seg",
                             delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_cna_hg19_seg.txt")
@@ -98,14 +105,15 @@ write_tsv(x = data_cna_hg19,
           file = "../data/01_data_cna_hg19.tsv")
 ```
 
-## cna
+## CNA
 
 ```{r}
 #| label: load_cna
 #| message: false
 #| warning: false
+#| echo: true
 
-data_cna <- read_delim("../data/_raw/msk_chord_2024/data_cna.txt",
+data_cna <- read_delim(file = "../data/_raw/msk_chord_2024/data_cna.txt",
                        delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_cna.txt")
@@ -116,15 +124,16 @@ write_tsv(x = data_cna,
           file = "../data/01_data_cna.tsv")
 ```
 
-## gene_panel_matrix
+## Gene panel matrix
 
 ```{r}
 #| label: load_gene_panel_matrix
 #| message: false
 #| warning: false
+#| echo: true
 
-data_gene_panel_matrix <- read_delim("../data/_raw/msk_chord_2024/data_gene_panel_matrix.txt",
-                       delim = "\t")
+data_gene_panel_matrix <- read_delim(file = "../data/_raw/msk_chord_2024/data_gene_panel_matrix.txt",
+                                     delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_gene_panel_matrix.txt")
 
@@ -134,15 +143,16 @@ write_tsv(x = data_gene_panel_matrix,
           file = "../data/01_data_gene_panel_matrix.tsv")
 ```
 
-## mutations
+## Mutations
 
 ```{r}
 #| label: load_mutations
 #| message: false
 #| warning: false
+#| echo: true
 
-data_mutations <- read_delim("../data/_raw/msk_chord_2024/data_mutations.txt",
-                       delim = "\t")
+data_mutations <- read_delim(file = "../data/_raw/msk_chord_2024/data_mutations.txt",
+                             delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_mutations.txt")
 
@@ -152,15 +162,16 @@ write_tsv(x = data_mutations,
           file = "../data/01_data_mutations.tsv")
 ```
 
-## sv
+## SV
 
 ```{r}
 #| label: load_sv
 #| message: false
 #| warning: false
+#| echo: true
 
-data_sv <- read_delim("../data/_raw/msk_chord_2024/data_sv.txt",
-                       delim = "\t")
+data_sv <- read_delim(file = "../data/_raw/msk_chord_2024/data_sv.txt",
+                      delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_sv.txt")
 
@@ -172,14 +183,15 @@ write_tsv(x = data_sv,
 
 ## Timeline data
 
-### ca_15_3_labs
+### CA 15-3 labs
 
 ```{r}
 #| label: load_timeline_ca_15_3_labs
 #| message: false
 #| warning: false
+#| echo: true
 
-data_timeline_ca_15_3_labs <- read_delim("../data/_raw/msk_chord_2024/data_timeline_ca_15-3_labs.txt",
+data_timeline_ca_15_3_labs <- read_delim(file = "../data/_raw/msk_chord_2024/data_timeline_ca_15-3_labs.txt",
                                          delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_timeline_ca_15-3_labs.txt")
@@ -190,15 +202,16 @@ write_tsv(x = data_timeline_ca_15_3_labs,
           file = "../data/01_data_timeline_ca_15_3_labs.tsv")
 ```
 
-### ca_19_9_labs
+### CA 19-9 labs
 
 ```{r}
 #| label: load_timeline_ca_19_9_labs
 #| message: false
 #| warning: false
+#| echo: true
 
-data_timeline_ca_19_9_labs <- read_delim("../data/_raw/msk_chord_2024/data_timeline_ca_19-9_labs.txt",
-                                            delim = "\t")
+data_timeline_ca_19_9_labs <- read_delim(file = "../data/_raw/msk_chord_2024/data_timeline_ca_19-9_labs.txt",
+                                         delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_timeline_ca_19-9_labs.txt")
 
@@ -208,14 +221,15 @@ write_tsv(x = data_timeline_ca_19_9_labs,
           file = "../data/01_data_timeline_ca_19_9_labs.tsv")
 ```
 
-### cancer_presence
+### Cancer presence
 
 ```{r}
 #| label: load_timeline_cancer_presence
 #| message: false
 #| warning: false
+#| echo: true
 
-data_timeline_cancer_presence <- read_delim("../data/_raw/msk_chord_2024/data_timeline_cancer_presence.txt",
+data_timeline_cancer_presence <- read_delim(file = "../data/_raw/msk_chord_2024/data_timeline_cancer_presence.txt",
                                             delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_timeline_cancer_presence.txt")
@@ -226,15 +240,16 @@ write_tsv(x = data_timeline_cancer_presence,
           file = "../data/01_data_timeline_cancer_presence.tsv")
 ```
 
-### cea_labs
+### CEA labs
 
 ```{r}
 #| label: load_timeline_cea_labs
 #| message: false
 #| warning: false
+#| echo: true
 
-data_timeline_cea_labs <- read_delim("../data/_raw/msk_chord_2024/data_timeline_cea_labs.txt",
-                                      delim = "\t")
+data_timeline_cea_labs <- read_delim(file = "../data/_raw/msk_chord_2024/data_timeline_cea_labs.txt",
+                                     delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_timeline_cea_labs.txt")
 
@@ -244,14 +259,15 @@ write_tsv(x = data_timeline_cea_labs,
           file = "../data/01_data_timeline_cea_labs.tsv")
 ```
 
-### diagnosis
+### Diagnosis
 
 ```{r}
 #| label: load_timeline_diagnosis
 #| message: false
 #| warning: false
+#| echo: true
 
-data_timeline_diagnosis <- read_delim("../data/_raw/msk_chord_2024/data_timeline_diagnosis.txt",
+data_timeline_diagnosis <- read_delim(file = "../data/_raw/msk_chord_2024/data_timeline_diagnosis.txt",
                                       delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_timeline_diagnosis.txt")
@@ -262,15 +278,16 @@ write_tsv(x = data_timeline_diagnosis,
           file = "../data/01_data_timeline_diagnosis.tsv")
 ```
 
-### gleason
+### Gleason
 
 ```{r}
 #| label: load_timeline_gleason
 #| message: false
 #| warning: false
+#| echo: true
 
-data_timeline_gleason <- read_delim("../data/_raw/msk_chord_2024/data_timeline_gleason.txt",
-                                              delim = "\t")
+data_timeline_gleason <- read_delim(file = "../data/_raw/msk_chord_2024/data_timeline_gleason.txt",
+                                    delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_timeline_gleason.txt")
 
@@ -280,15 +297,16 @@ write_tsv(x = data_timeline_gleason,
           file = "../data/01_data_timeline_gleason.tsv")
 ```
 
-### mmr
+### MMR
 
 ```{r}
 #| label: load_timeline_mmr
 #| message: false
 #| warning: false
+#| echo: true
 
-data_timeline_mmr <- read_delim("../data/_raw/msk_chord_2024/data_timeline_mmr.txt",
-                                              delim = "\t")
+data_timeline_mmr <- read_delim(file = "../data/_raw/msk_chord_2024/data_timeline_mmr.txt",
+                                delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_timeline_mmr.txt")
 
@@ -298,15 +316,16 @@ write_tsv(x = data_timeline_mmr,
           file = "../data/01_data_timeline_mmr.tsv")
 ```
 
-### pdl1
+### PD-L1
 
 ```{r}
 #| label: load_timeline_pdl1
 #| message: false
 #| warning: false
+#| echo: true
 
-data_timeline_pdl1 <- read_delim("../data/_raw/msk_chord_2024/data_timeline_pdl1.txt",
-                                              delim = "\t")
+data_timeline_pdl1 <- read_delim(file = "../data/_raw/msk_chord_2024/data_timeline_pdl1.txt",
+                                 delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_timeline_pdl1.txt")
 
@@ -316,15 +335,16 @@ write_tsv(x = data_timeline_pdl1,
           file = "../data/01_data_timeline_pdl1.tsv")
 ```
 
-### performance_status
+### Performance status
 
 ```{r}
 #| label: load_timeline_performance_status
 #| message: false
 #| warning: false
+#| echo: true
 
-data_timeline_performance_status <- read_delim("../data/_raw/msk_chord_2024/data_timeline_performance_status.txt",
-                                              delim = "\t")
+data_timeline_performance_status <- read_delim(file = "../data/_raw/msk_chord_2024/data_timeline_performance_status.txt",
+                                               delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_timeline_performance_status.txt")
 
@@ -334,15 +354,16 @@ write_tsv(x = data_timeline_performance_status,
           file = "../data/01_data_timeline_performance_status.tsv")
 ```
 
-### prior_meds
+### Prior meds
 
 ```{r}
 #| label: load_timeline_prior_meds
 #| message: false
 #| warning: false
+#| echo: true
 
-data_timeline_prior_meds <- read_delim("../data/_raw/msk_chord_2024/data_timeline_prior_meds.txt",
-                                        delim = "\t")
+data_timeline_prior_meds <- read_delim(file = "../data/_raw/msk_chord_2024/data_timeline_prior_meds.txt",
+                                       delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_timeline_prior_meds.txt")
 
@@ -352,14 +373,15 @@ write_tsv(x = data_timeline_prior_meds,
           file = "../data/01_data_timeline_prior_meds.tsv")
 ```
 
-### progression
+### Progression
 
 ```{r}
 #| label: load_timeline_progression
 #| message: false
 #| warning: false
+#| echo: true
 
-data_timeline_progression <- read_delim("../data/_raw/msk_chord_2024/data_timeline_progression.txt",
+data_timeline_progression <- read_delim(file = "../data/_raw/msk_chord_2024/data_timeline_progression.txt",
                                         delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_timeline_progression.txt")
@@ -370,15 +392,16 @@ write_tsv(x = data_timeline_progression,
           file = "../data/01_data_timeline_progression.tsv")
 ```
 
-### psa_labs
+### PSA labs
 
 ```{r}
 #| label: load_timeline_psa_labs
 #| message: false
 #| warning: false
+#| echo: true
 
-data_timeline_psa_labs <- read_delim("../data/_raw/msk_chord_2024/data_timeline_psa_labs.txt",
-                                        delim = "\t")
+data_timeline_psa_labs <- read_delim(file = "../data/_raw/msk_chord_2024/data_timeline_psa_labs.txt",
+                                     delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_timeline_psa_labs.txt")
 
@@ -388,15 +411,16 @@ write_tsv(x = data_timeline_psa_labs,
           file = "../data/01_data_timeline_psa_labs.tsv")
 ```
 
-### radiation
+### Radiation
 
 ```{r}
 #| label: load_timeline_radiation
 #| message: false
 #| warning: false
+#| echo: true
 
-data_timeline_radiation <- read_delim("../data/_raw/msk_chord_2024/data_timeline_radiation.txt",
-                                        delim = "\t")
+data_timeline_radiation <- read_delim(file = "../data/_raw/msk_chord_2024/data_timeline_radiation.txt",
+                                      delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_timeline_radiation.txt")
 
@@ -406,15 +430,16 @@ write_tsv(x = data_timeline_radiation,
           file = "../data/01_data_timeline_radiation.tsv")
 ```
 
-### specimen_surgery
+### Specimen surgery
 
 ```{r}
 #| label: load_timeline_specimen_surgery
 #| message: false
 #| warning: false
+#| echo: true
 
-data_timeline_specimen_surgery <- read_delim("../data/_raw/msk_chord_2024/data_timeline_specimen_surgery.txt",
-                                    delim = "\t")
+data_timeline_specimen_surgery <- read_delim(file = "../data/_raw/msk_chord_2024/data_timeline_specimen_surgery.txt",
+                                             delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_timeline_specimen_surgery.txt")
 
@@ -424,15 +449,16 @@ write_tsv(x = data_timeline_specimen_surgery,
           file = "../data/01_data_timeline_specimen_surgery.tsv")
 ```
 
-### specimen
+### Specimen
 
 ```{r}
 #| label: load_timeline_specimen
 #| message: false
 #| warning: false
+#| echo: true
 
-data_timeline_specimen <- read_delim("../data/_raw/msk_chord_2024/data_timeline_specimen.txt",
-                                    delim = "\t")
+data_timeline_specimen <- read_delim(file = "../data/_raw/msk_chord_2024/data_timeline_specimen.txt",
+                                     delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_timeline_specimen.txt")
 
@@ -442,14 +468,15 @@ write_tsv(x = data_timeline_specimen,
           file = "../data/01_data_timeline_specimen.tsv")
 ```
 
-### surgery
+### Surgery
 
 ```{r}
 #| label: load_timeline_surgery
 #| message: false
 #| warning: false
+#| echo: true
 
-data_timeline_surgery <- read_delim("../data/_raw/msk_chord_2024/data_timeline_surgery.txt",
+data_timeline_surgery <- read_delim(file = "../data/_raw/msk_chord_2024/data_timeline_surgery.txt",
                                     delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_timeline_surgery.txt")
@@ -460,14 +487,15 @@ write_tsv(x = data_timeline_surgery,
           file = "../data/01_data_timeline_surgery.tsv")
 ```
 
-### treatment
+### Treatment
 
 ```{r}
 #| label: load_timeline_treatment
 #| message: false
 #| warning: false
+#| echo: true
 
-data_timeline_treatment <- read_delim("../data/_raw/msk_chord_2024/data_timeline_treatment.txt",
+data_timeline_treatment <- read_delim(file = "../data/_raw/msk_chord_2024/data_timeline_treatment.txt",
                                       delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_timeline_treatment.txt")
@@ -478,15 +506,16 @@ write_tsv(x = data_timeline_treatment,
           file = "../data/01_data_timeline_treatment.tsv")
 ```
 
-### tumor_sites
+### Tumor sites
 
 ```{r}
 #| label: load_timeline_tumor_sites
 #| message: false
 #| warning: false
+#| echo: true
 
-data_timeline_tumor_sites <- read_delim("../data/_raw/msk_chord_2024/data_timeline_tumor_sites.txt",
-                                      delim = "\t")
+data_timeline_tumor_sites <- read_delim(file = "../data/_raw/msk_chord_2024/data_timeline_tumor_sites.txt",
+                                        delim = "\t")
 
 readLines("../data/_raw/msk_chord_2024/meta_timeline_tumor_sites.txt")
 

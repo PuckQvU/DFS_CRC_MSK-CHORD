@@ -1,0 +1,349 @@
+---
+title: "Post-hoc model evaluation"
+author: "Puck Quarles van Ufford"
+date: today
+format: html
+---
+
+# Set up
+
+```{r}
+#| label: packages
+#| message: false
+#| echo: true
+
+library("tidyverse")
+library("ggrepel")
+library("patchwork")
+library("caret")
+library("survival")
+```
+
+```{r}
+#| label: seed
+#| echo: true
+
+set.seed(8)
+```
+
+# Formulas
+
+```{r}
+#| label: feature_inclusion_stepwise_Cox
+#| echo: true
+
+# Calculate Jaccard similarity score
+jaccard <- function(a, b) {
+  length(intersect(a, b)) / length(union(a, b))
+}
+```
+
+# Load data
+
+```{r}
+#| label: load_data
+#| message: false
+#| echo: true
+
+data_os <- read_tsv(file = "../data/03_data_train_os.tsv")
+
+data_dfs <- read_tsv(file = "../data/03_data_train_dfs.tsv")
+```
+
+# Load results
+
+```{r}
+#| label: load_results
+#| message: false
+#| echo: true
+
+results_stepwise_cox_os_100 <- read_tsv("../results/06_res_per_fold_OS_100_max.tsv")
+
+results_stepwise_cox_dfs_100 <- read_tsv("../results/06_res_per_fold_DFS_100_max.tsv")
+```
+
+# Features being selected 
+
+## Forward stepwise Cox models
+
+```{r}
+#| label: feature_selection_stepwise_cox_os
+#| message: false
+#| echo: true
+
+summary_stepwise_cox_os_100 <- results_stepwise_cox_os_100 |> 
+  group_by(added_feature) |> 
+  summarise(times_included = n()/5,
+            when_included = round(mean(iteration))) 
+
+count_times_included <- summary_stepwise_cox_os_100 |> 
+  count(times_included)
+
+top_10_features_os <- results_stepwise_cox_os_100 |> 
+  filter(iteration <= 10) |> 
+  group_by(fold) |> 
+  summarise(features = list(added_feature),
+            .groups = "drop")
+
+similarity_stepwise_cox_os <- crossing(fold_i = top_10_features_os$fold,
+                                       fold_j = top_10_features_os$fold) |> 
+  filter(fold_i < fold_j) |> 
+  rowwise() |> 
+  mutate(jaccard = jaccard(top_10_features_os$features[[which(top_10_features_os$fold == fold_i)]],
+                           top_10_features_os$features[[which(top_10_features_os$fold == fold_j)]])) |> 
+  ungroup() |> 
+  summarise(mean_jaccard = mean(jaccard),
+            sd_jaccard = sd(jaccard))
+
+summary_stepwise_cox_os_100 |> 
+  ggplot(mapping = aes(x = as_factor(times_included),
+                       y = when_included)) +
+  geom_boxplot(color = "darkgrey") +
+  geom_point(data = \(df) df |> 
+               filter(times_included == 1)) +
+  geom_text_repel(data = \(df) df |> 
+                    filter(times_included == 1),
+                  mapping = aes(label = added_feature),
+                  size = 3,
+                  max.overlaps = Inf) + 
+  geom_text(data = count_times_included,
+            mapping = aes(x = as_factor(times_included),
+                          y = Inf,
+                          label = paste0("n = ", n)),
+            vjust = 1.3,
+            color = "black",
+            size = 3.5,
+            inherit.aes = FALSE) +
+  labs(title = "Feature inclusion in forward stepwise Cox model (OS)",
+       subtitle = paste0("Feature sets included: all (100 max). Jaccard similarity top 10 features: ",
+                         round(similarity_stepwise_cox_os[1], 2),
+                         " (sd ",
+                         round(similarity_stepwise_cox_os[2], 2),
+                         ")"),
+       x = "Fraction of folds that feature was selected",
+       y = "Mean iteration that feature was selected") +
+  theme_minimal()
+
+ggsave("../results/09_feature_selection_plot_stepwise_cox_OS.png")
+```
+
+```{r}
+#| label: feature_selection_stepwise_cox_dfs
+#| message: false
+#| echo: true
+
+summary_stepwise_cox_dfs_100 <- results_stepwise_cox_dfs_100 |> 
+  group_by(added_feature) |> 
+  summarise(times_included = n()/5,
+            when_included = round(mean(iteration))) 
+
+count_times_included <- summary_stepwise_cox_dfs_100 |> 
+  count(times_included)
+
+top_10_features_dfs <- results_stepwise_cox_dfs_100 |> 
+  filter(iteration <= 10) |> 
+  group_by(fold) |> 
+  summarise(features = list(added_feature),
+            .groups = "drop")
+
+similarity_stepwise_cox_dfs <- crossing(fold_i = top_10_features_dfs$fold,
+                                        fold_j = top_10_features_dfs$fold) |> 
+  filter(fold_i < fold_j) |> 
+  rowwise() |> 
+  mutate(jaccard = jaccard(top_10_features_dfs$features[[which(top_10_features_dfs$fold == fold_i)]],
+                           top_10_features_dfs$features[[which(top_10_features_dfs$fold == fold_j)]])) |> 
+  ungroup() |> 
+  summarise(mean_jaccard = mean(jaccard),
+            sd_jaccard = sd(jaccard))
+
+summary_stepwise_cox_dfs_100 |> 
+  ggplot(mapping = aes(x = as_factor(times_included),
+                       y = when_included)) +
+  geom_boxplot(color = "darkgrey") +
+  geom_point(data = \(df) df |> 
+               filter(times_included == 1)) +
+  geom_text_repel(data = \(df) df |> 
+                    filter(times_included == 1),
+                  mapping = aes(label = added_feature),
+                  size = 3,
+                  max.overlaps = Inf) + 
+  geom_text(data = count_times_included,
+            mapping = aes(x = as_factor(times_included),
+                          y = Inf,
+                          label = paste0("n = ", n)),
+            vjust = 1.3,
+            color = "black",
+            size = 3.5,
+            inherit.aes = FALSE) +
+  labs(title = "Feature inclusion in forward stepwise Cox model (DFS)",
+       subtitle = paste0("Feature sets included: all (100 max). Jaccard similarity top 10 features: ",
+                         round(similarity_stepwise_cox_dfs[1], 2),
+                         " (sd ",
+                         round(similarity_stepwise_cox_dfs[2], 2),
+                         ")"),
+       x = "Fraction of folds that feature was selected",
+       y = "Mean iteration that feature was selected") +
+  theme_minimal()
+
+ggsave("../results/09_feature_selection_plot_stepwise_cox_DFS.png")
+```
+
+# Set up cross-validation
+
+```{r}
+#| label: 5_fold_CV
+#| echo: true
+
+folds_os <- createFolds(data_os$os_status,
+                        k = 5,
+                        list = TRUE,
+                        returnTrain = FALSE)
+
+folds_dfs <- createFolds(data_dfs$dfs_status,
+                         k = 5,
+                         list = TRUE,
+                         returnTrain = FALSE)
+```
+
+# Check feature importance
+
+```{r}
+#| label: forward_stepwise_Cox_function
+#| echo: true
+
+forward_cox <- function(data,
+                        time_var,
+                        status_var, 
+                        folds, 
+                        top_10) {
+  models <- list()
+
+  outcome_cols <- c(time_var, 
+                    status_var)
+  
+  all_features <- setdiff(colnames(data),
+                          c(outcome_cols, 
+                            "patient_id", 
+                            "sample_id"))
+
+  for (k in seq_along(folds)) {
+
+    test_idx  <- folds[[k]]
+    train_idx <- setdiff(seq_len(nrow(data)),
+                         test_idx)
+
+    data_train <- data[train_idx, ]
+    data_test  <- data[test_idx, ]
+
+    features <- unlist(top_10[k, 2])
+    
+    formula <- as.formula(paste0(
+      "Surv(", time_var, ", ", status_var,  ") ~ ",
+      paste(features,
+            collapse = " + ")))
+    
+    model <- coxph(formula,
+                   data = data_train)
+    
+    models[[length(models) + 1]]  <- model
+  }
+  
+  return(models)
+  }
+```
+
+```{r}
+models_os <- forward_cox(data_os,
+                         "years_to_os_event",
+                         "os_status",
+                         folds_os, 
+                         top_10_features_os)
+
+betas_os <- list()
+
+for(i in seq(1:5)) {
+  model <- unlist(models_os[i])
+  
+  features <- names(model[1:10]) |> 
+    str_remove("^coefficients\\.")
+  
+  betas <- as.numeric(model[1:10])
+  
+  betas_os[[i]] <- tibble(feature = features,
+                        beta = betas,
+                        fold = i)
+  }
+
+betas_os <- bind_rows(betas_os)
+
+betas_os |> 
+  group_by(feature) |> 
+  summarise(times_selected = n(),
+            mean_beta = mean(beta),
+            lower_95 = quantile(beta, 0.025),
+            upper_95 = quantile(beta, 0.975)) |>
+ ggplot(mapping = aes(y = reorder(feature, 
+                                  times_selected),
+                      x = mean_beta,
+                      color = as.character(times_selected))) +
+  geom_point() +
+  geom_errorbarh(mapping = aes(xmin = lower_95, 
+                               xmax = upper_95)) +
+  theme_minimal() +
+  labs(title = "Betas of top 10 features forward stepwise Cox (OS)",
+       y = NULL,
+       x = "Mean beta (95% CI)",
+       color = "Selected in n folds") +
+  theme(legend.position = "bottom")
+
+ggsave("../results/09_beta_top10_plot_stepwise_cox_OS.png")
+
+```
+
+```{r}
+models_dfs <- forward_cox(data_dfs,
+                          "years_to_dfs_event",
+                          "dfs_status",
+                          folds_dfs, 
+                          top_10_features_dfs)
+
+betas_dfs <- list()
+
+for(i in seq(1:5)) {
+  model <- unlist(models_dfs[i])
+  
+  features <- names(model[1:10]) |> 
+    str_remove("^coefficients\\.")
+  
+  betas <- as.numeric(model[1:10])
+  
+  betas_dfs[[i]] <- tibble(feature = features,
+                        beta = betas,
+                        fold = i)
+  }
+
+betas_dfs <- bind_rows(betas_dfs)
+
+betas_dfs |> 
+  group_by(feature) |> 
+  summarise(times_selected = n(),
+            mean_beta = mean(beta),
+            lower_95 = quantile(beta, 0.025),
+            upper_95 = quantile(beta, 0.975)) |>
+ ggplot(mapping = aes(y = reorder(feature, 
+                                  times_selected),
+                      x = mean_beta,
+                      color = as.character(times_selected))) +
+  geom_point() +
+  geom_errorbarh(mapping = aes(xmin = lower_95, 
+                               xmax = upper_95)) +
+  theme_minimal() +
+  labs(title = "Betas of top 10 features forward stepwise Cox (DFS)",
+       y = NULL,
+       x = "Mean beta (95% CI)",
+       color = "Selected in n folds") +
+  theme(legend.position = "bottom")
+
+ggsave("../results/09_beta_top10_plot_stepwise_cox_DFS.png")
+
+```

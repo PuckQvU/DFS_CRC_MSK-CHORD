@@ -1,0 +1,848 @@
+---
+title: "Cox models"
+author: "Puck Quarles van Ufford"
+date: today
+format: html
+---
+
+# Set up
+
+```{r}
+#| label: packages
+#| message: false
+#| echo: true
+
+library("tidyverse")
+library("glmnet")
+library("survival")
+library("caret")
+```
+
+```{r}
+#| label: seed
+#| echo: true
+
+set.seed(8)
+```
+
+# Load data
+
+```{r}
+#| label: load_data
+#| message: false
+#| echo: true
+
+data_os <- read_tsv(file = "../data/03_data_train_os.tsv")
+data_os_noNLP <- read_tsv(file = "../data/03_data_train_os_noNLP.tsv")
+data_os_nogenomic <- read_tsv(file = "../data/03_data_train_os_nogenomic.tsv")
+data_os_noNLPgenomic <- read_tsv(file = "../data/03_data_train_os_noNLPgenomic.tsv")
+
+data_dfs <- read_tsv(file = "../data/03_data_train_dfs.tsv")
+data_dfs_noNLP <- read_tsv(file = "../data/03_data_train_dfs_noNLP.tsv")
+data_dfs_nogenomic <- read_tsv(file = "../data/03_data_train_dfs_nogenomic.tsv")
+data_dfs_noNLPgenomic <- read_tsv(file = "../data/03_data_train_dfs_noNLPgenomic.tsv")
+```
+
+# Settings
+
+```{r}
+#| label: settings
+#| echo: true
+
+regularization <- TRUE
+alpha <- 1 # 0.5 for elastic-net, 1 for lasso, 0 for ridge
+
+prevalence_filter <- FALSE
+prevalence_threshold <- 0.95
+
+p_value_threshold <- 0.05
+```
+
+# Prevalence filter
+
+```{r}
+#| label: prevalence_filter
+#| message: false
+#| echo: true
+
+if(prevalence_filter){
+  # OS
+  col_prevalence <- data_os |> 
+    summarise(across(everything(),
+                     ~ max(table(.)/n()))) |> 
+    pivot_longer(everything(),
+                 names_to = "column",
+                 values_to = "prevalence")
+  
+  cols_to_keep <- col_prevalence |> 
+    filter(prevalence <= prevalence_threshold) |> 
+    pull(column)
+    
+  data_os <- data_os |> 
+    select(all_of(cols_to_keep))
+  
+  # OS no NLP
+  col_prevalence <- data_os_noNLP |> 
+    summarise(across(everything(),
+                     ~ max(table(.)/n()))) |> 
+    pivot_longer(everything(),
+                 names_to = "column",
+                 values_to = "prevalence")
+  
+  cols_to_keep <- col_prevalence |> 
+    filter(prevalence <= prevalence_threshold) |> 
+    pull(column)
+    
+  data_os_noNLP <- data_os_noNLP |> 
+    select(all_of(cols_to_keep))
+  
+  # OS no genomic
+  col_prevalence <- data_os_nogenomic |> 
+    summarise(across(everything(),
+                     ~ max(table(.)/n()))) |> 
+    pivot_longer(everything(),
+                 names_to = "column",
+                 values_to = "prevalence")
+  
+  cols_to_keep <- col_prevalence |> 
+    filter(prevalence <= prevalence_threshold) |> 
+    pull(column)
+    
+  data_os_nogenomic <- data_os_nogenomic |> 
+    select(all_of(cols_to_keep))
+  
+  # OS routine data
+  col_prevalence <- data_os_noNLPgenomic |> 
+    summarise(across(everything(),
+                     ~ max(table(.)/n()))) |> 
+    pivot_longer(everything(),
+                 names_to = "column",
+                 values_to = "prevalence")
+  
+  cols_to_keep <- col_prevalence |> 
+    filter(prevalence <= prevalence_threshold) |> 
+    pull(column)
+    
+  data_os_noNLPgenomic <- data_os_noNLPgenomic |> 
+    select(all_of(cols_to_keep))
+  
+  # DFS
+  col_prevalence <- data_dfs |> 
+    summarise(across(everything(),
+                     ~ max(table(.)/n()))) |> 
+    pivot_longer(everything(),
+                 names_to = "column",
+                 values_to = "prevalence")
+  
+  cols_to_keep <- col_prevalence |> 
+    filter(prevalence <= prevalence_threshold) |> 
+    pull(column)
+    
+  data_dfs <- data_dfs |> 
+    select(all_of(cols_to_keep))
+  
+  # DFS no NLP
+  col_prevalence <- data_dfs_noNLP |> 
+    summarise(across(everything(),
+                     ~ max(table(.)/n()))) |> 
+    pivot_longer(everything(),
+                 names_to = "column",
+                 values_to = "prevalence")
+  
+  cols_to_keep <- col_prevalence |> 
+    filter(prevalence <= prevalence_threshold) |> 
+    pull(column)
+    
+  data_dfs_noNLP <- data_dfs_noNLP |> 
+    select(all_of(cols_to_keep))
+  
+  # DFS no genomic
+  col_prevalence <- data_dfs_nogenomic |> 
+    summarise(across(everything(),
+                     ~ max(table(.)/n()))) |> 
+    pivot_longer(everything(),
+                 names_to = "column",
+                 values_to = "prevalence")
+  
+  cols_to_keep <- col_prevalence |> 
+    filter(prevalence <= prevalence_threshold) |> 
+    pull(column)
+    
+  data_dfs_nogenomic <- data_dfs_nogenomic |> 
+    select(all_of(cols_to_keep))
+  
+  # DFS routine data
+  col_prevalence <- data_dfs_noNLPgenomic |> 
+    summarise(across(everything(),
+                     ~ max(table(.)/n()))) |> 
+    pivot_longer(everything(),
+                 names_to = "column",
+                 values_to = "prevalence")
+  
+  cols_to_keep <- col_prevalence |> 
+    filter(prevalence <= prevalence_threshold) |> 
+    pull(column)
+    
+  data_dfs_noNLPgenomic <- data_dfs_noNLPgenomic |> 
+    select(all_of(cols_to_keep))
+}
+```
+
+# Set up cross-validation
+
+```{r}
+#| label: 5_fold_CV
+#| echo: true
+
+folds_os <- createFolds(data_os$os_status,
+                        k = 5,
+                        list = TRUE,
+                        returnTrain = FALSE)
+folds_os_noNLP <- createFolds(data_os_noNLP$os_status,
+                              k = 5,
+                              list = TRUE,
+                              returnTrain = FALSE)
+folds_os_nogenomic <- createFolds(data_os_nogenomic$os_status,
+                                  k = 5,
+                                  list = TRUE,
+                                  returnTrain = FALSE)
+folds_os_noNLPgenomic <- createFolds(data_os_noNLPgenomic$os_status,
+                                     k = 5,
+                                     list = TRUE,
+                                     returnTrain = FALSE)
+
+folds_dfs <- createFolds(data_dfs$dfs_status,
+                         k = 5,
+                         list = TRUE,
+                         returnTrain = FALSE)
+folds_dfs_noNLP <- createFolds(data_dfs_noNLP$dfs_status,
+                               k = 5,
+                               list = TRUE,
+                               returnTrain = FALSE)
+folds_dfs_nogenomic <- createFolds(data_dfs_nogenomic$dfs_status,
+                                   k = 5,
+                                   list = TRUE,
+                                   returnTrain = FALSE)
+folds_dfs_noNLPgenomic <- createFolds(data_dfs_noNLPgenomic$dfs_status,
+                                      k = 5,
+                                      list = TRUE,
+                                      returnTrain = FALSE)
+```
+
+# Cox model workflow
+
+```{r}
+#| label: cox_workflow_function
+#| echo: true
+
+run_cox_workflow <- function(data,
+                             time_var,
+                             status_var,
+                             p_cutoff = p_value_threshold) {
+
+  outcome_cols <- c(time_var, 
+                    status_var)
+
+  all_features <- setdiff(colnames(data),
+                          c(outcome_cols, 
+                            "patient_id", 
+                            "sample_id"))
+
+  # Regularized Cox model
+  x <- data |>
+    select(all_of(all_features)) |>
+    model.matrix(~ . -1, data = _)
+
+  y <- Surv(data[[time_var]],
+            data[[status_var]])
+
+  if (regularization) {
+
+    cvfit <- cv.glmnet(x,
+                       y,
+                       family = "cox",
+                       type.measure = "C",
+                       alpha = alpha)
+
+    lambda_opt <- cvfit$lambda.min
+
+    betas <- coef(cvfit, 
+                  s = lambda_opt)
+
+    beta_vec <- as.numeric(betas)
+
+    selected_features <- rownames(betas)[beta_vec != 0]
+
+  } else {
+    selected_features <- colnames(x)
+  }
+
+  # Univariate Cox models
+  if (length(selected_features) == 0) {
+    return(NA)
+  }
+
+  univ_results <- map_dfr(
+    selected_features,
+    function(var) {
+
+      formula <- as.formula(
+        paste0(
+          "Surv(", time_var, ", ", status_var, ") ~ ",
+          var
+        )
+      )
+
+      fit <- coxph(formula, 
+                   data = data)
+      
+      fit <- summary(fit)
+
+      tibble(variable = var,
+             p_value  = fit$wald["pvalue"])
+    }
+  )
+
+  if (nrow(univ_results) == 0) {
+    return(NA)
+  }
+
+  significant_vars <- univ_results |>
+    arrange(p_value) |>
+    filter(p_value < p_cutoff) |>
+    pull(variable)
+
+  if (length(significant_vars) == 0) {
+    return(NA)
+  }
+
+  # Multivariate Cox model
+  formula <- as.formula(
+    paste0(
+      "Surv(", time_var, ", ", status_var, ") ~ ",
+      paste(significant_vars, collapse = " + ")
+    )
+  )
+
+  model <- coxph(formula, 
+                 data = data)
+  
+  return(model)
+}
+```
+
+# Predicting OS
+
+## All features
+
+```{r}
+#| label: predict_os
+#| echo: true
+#| warning: false
+
+res_os <- map_dbl(folds_os,
+                  ~ {
+                    
+        test_idx  <- .x
+        train_idx <- setdiff(seq_len(nrow(data_os)), 
+                             test_idx)
+
+        train_data <- data_os[train_idx, ]
+        test_data  <- data_os[test_idx, ]
+
+        fit <- run_cox_workflow(train_data,
+                                "years_to_os_event",
+                                "os_status")
+        
+        if (is.na(fit)[1]){
+          NA
+        } else {
+          pred <- predict(fit, 
+                          newdata = test_data)
+          
+          risk <- -pred
+          
+          concordance(Surv(test_data$years_to_os_event,
+                           test_data$os_status) ~ risk)$concordance
+          
+        }})
+
+summary_os <- tibble(
+  mean_c_index = mean(res_os,
+                      na.rm = TRUE),
+  sd_c_index = sd(res_os,
+                  na.rm = TRUE),
+  lower_95 = quantile(res_os, 0.025,
+                      na.rm = TRUE),
+  upper_95 = quantile(res_os, 0.975,
+                      na.rm = TRUE)) |> 
+  mutate(model = "Cox",
+         features = "all",
+         outcome = "OS",
+         setting = ifelse(regularization,
+                          case_when(alpha == 1 ~ "lasso",
+                                    alpha == 0.5 ~ "elastic-net",
+                                    TRUE ~ "ERROR"),
+                          ifelse(prevalence_filter,
+                                 "prevalence_filter",
+                                 "classic"))) |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, setting))
+
+summary_os
+
+write_tsv(summary_os,
+          file = "../results/05_cox_models_results.tsv",
+          append = TRUE)
+```
+
+## No NLP data
+
+```{r}
+#| label: predict_os_noNLP
+#| echo: true
+#| warning: false
+
+res_os_noNLP <- map_dbl(folds_os_noNLP,
+                  ~ {
+                    
+        test_idx  <- .x
+        train_idx <- setdiff(seq_len(nrow(data_os_noNLP)), 
+                             test_idx)
+
+        train_data <- data_os_noNLP[train_idx, ]
+        test_data  <- data_os_noNLP[test_idx, ]
+
+        fit <- run_cox_workflow(train_data,
+                                "years_to_os_event",
+                                "os_status")
+
+        if (is.na(fit)[1]){
+          NA
+        } else {
+          pred <- predict(fit, 
+                          newdata = test_data)
+          
+          risk <- -pred
+          
+          concordance(Surv(test_data$years_to_os_event,
+                           test_data$os_status) ~ risk)$concordance
+          
+        }})
+
+summary_os_noNLP <- tibble(
+  mean_c_index = mean(res_os_noNLP,
+                      na.rm = TRUE),
+  sd_c_index = sd(res_os_noNLP,
+                  na.rm = TRUE),
+  lower_95 = quantile(res_os_noNLP, 0.025,
+                      na.rm = TRUE),
+  upper_95 = quantile(res_os_noNLP, 0.975,
+                      na.rm = TRUE)) |> 
+  mutate(model = "Cox",
+         features = "noNLP",
+         outcome = "OS",
+         setting = ifelse(regularization,
+                          case_when(alpha == 1 ~ "lasso",
+                                    alpha == 0.5 ~ "elastic-net",
+                                    TRUE ~ "ERROR"),
+                          ifelse(prevalence_filter,
+                                 "prevalence_filter",
+                                 "classic"))) |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, setting))
+
+summary_os_noNLP
+
+write_tsv(summary_os_noNLP,
+          file = "../results/05_cox_models_results.tsv",
+          append = TRUE)
+```
+
+## No genomic data
+
+```{r}
+#| label: predict_os_nogenomic
+#| echo: true
+#| warning: false
+
+res_os_nogenomic <- map_dbl(folds_os_nogenomic,
+                  ~ {
+                    
+        test_idx  <- .x
+        train_idx <- setdiff(seq_len(nrow(data_os_nogenomic)), 
+                             test_idx)
+
+        train_data <- data_os_nogenomic[train_idx, ]
+        test_data  <- data_os_nogenomic[test_idx, ]
+
+        fit <- run_cox_workflow(train_data,
+                                "years_to_os_event",
+                                "os_status")
+
+        if (is.na(fit)[1]){
+          NA
+        } else {
+          pred <- predict(fit, 
+                          newdata = test_data)
+          
+          risk <- -pred
+          
+          concordance(Surv(test_data$years_to_os_event,
+                           test_data$os_status) ~ risk)$concordance
+          
+        }})
+
+summary_os_nogenomic <- tibble(
+  mean_c_index = mean(res_os_nogenomic,
+                      na.rm = TRUE),
+  sd_c_index = sd(res_os_nogenomic,
+                  na.rm = TRUE),
+  lower_95 = quantile(res_os_nogenomic, 0.025,
+                      na.rm = TRUE),
+  upper_95 = quantile(res_os_nogenomic, 0.975,
+                      na.rm = TRUE)) |> 
+  mutate(model = "Cox",
+         features = "nogenomic",
+         outcome = "OS",
+         setting = ifelse(regularization,
+                          case_when(alpha == 1 ~ "lasso",
+                                    alpha == 0.5 ~ "elastic-net",
+                                    TRUE ~ "ERROR"),
+                          ifelse(prevalence_filter,
+                                 "prevalence_filter",
+                                 "classic"))) |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, setting))
+
+summary_os_nogenomic
+
+write_tsv(summary_os_nogenomic,
+          file = "../results/05_cox_models_results.tsv",
+          append = TRUE)
+```
+
+## Only routine data
+
+```{r}
+#| label: predict_os_noNLPgenomic
+#| echo: true
+#| warning: false
+
+res_os_noNLPgenomic <- map_dbl(folds_os_noNLPgenomic,
+                  ~ {
+                    
+        test_idx  <- .x
+        train_idx <- setdiff(seq_len(nrow(data_os_noNLPgenomic)), 
+                             test_idx)
+
+        train_data <- data_os_noNLPgenomic[train_idx, ]
+        test_data  <- data_os_noNLPgenomic[test_idx, ]
+
+        fit <- run_cox_workflow(train_data,
+                                "years_to_os_event",
+                                "os_status")
+
+        if (is.na(fit)[1]){
+          NA
+        } else {
+          pred <- predict(fit, 
+                          newdata = test_data)
+          
+          risk <- -pred
+          
+          concordance(Surv(test_data$years_to_os_event,
+                           test_data$os_status) ~ risk)$concordance
+          
+        }})
+
+summary_os_noNLPgenomic <- tibble(
+  mean_c_index = mean(res_os_noNLPgenomic,
+                      na.rm = TRUE),
+  sd_c_index = sd(res_os_noNLPgenomic,
+                  na.rm = TRUE),
+  lower_95 = quantile(res_os_noNLPgenomic, 0.025,
+                      na.rm = TRUE),
+  upper_95 = quantile(res_os_noNLPgenomic, 0.975,
+                      na.rm = TRUE)) |> 
+  mutate(model = "Cox",
+         features = "noNLPgenomic",
+         outcome = "OS",
+         setting = ifelse(regularization,
+                          case_when(alpha == 1 ~ "lasso",
+                                    alpha == 0.5 ~ "elastic-net",
+                                    TRUE ~ "ERROR"),
+                          ifelse(prevalence_filter,
+                                 "prevalence_filter",
+                                 "classic"))) |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, setting))
+
+summary_os_noNLPgenomic
+
+write_tsv(summary_os_noNLPgenomic,
+          file = "../results/05_cox_models_results.tsv",
+          append = TRUE)
+```
+
+# Predicting DFS
+
+## All features
+
+```{r}
+#| label: predict_dfs
+#| echo: true
+#| warning: false
+
+res_dfs <- map_dbl(folds_dfs,
+                  ~ {
+                    
+        test_idx  <- .x
+        train_idx <- setdiff(seq_len(nrow(data_dfs)), 
+                             test_idx)
+
+        train_data <- data_dfs[train_idx, ]
+        test_data  <- data_dfs[test_idx, ]
+
+        fit <- run_cox_workflow(train_data,
+                                "years_to_dfs_event",
+                                "dfs_status")
+
+        if (is.na(fit)[1]){
+          NA
+        } else {
+          pred <- predict(fit, 
+                          newdata = test_data)
+          
+          risk <- -pred
+          
+          concordance(Surv(test_data$years_to_dfs_event,
+                           test_data$dfs_status) ~ risk)$concordance
+          
+        }})
+
+summary_dfs <- tibble(
+  mean_c_index = mean(res_dfs,
+                      na.rm = TRUE),
+  sd_c_index = sd(res_dfs,
+                  na.rm = TRUE),
+  lower_95 = quantile(res_dfs, 0.025,
+                      na.rm = TRUE),
+  upper_95 = quantile(res_dfs, 0.975,
+                      na.rm = TRUE)) |> 
+  mutate(model = "Cox",
+         features = "all",
+         outcome = "DFS",
+         setting = ifelse(regularization,
+                          case_when(alpha == 1 ~ "lasso",
+                                    alpha == 0.5 ~ "elastic-net",
+                                    TRUE ~ "ERROR"),
+                          ifelse(prevalence_filter,
+                                 "prevalence_filter",
+                                 "classic"))) |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, setting))
+
+summary_dfs
+
+write_tsv(summary_dfs,
+          file = "../results/05_cox_models_results.tsv",
+          append = TRUE)
+```
+
+## No NLP data
+
+```{r}
+#| label: predict_dfs_noNLP
+#| echo: true
+#| warning: false
+
+res_dfs_noNLP <- map_dbl(folds_dfs_noNLP,
+                  ~ {
+                    
+        test_idx  <- .x
+        train_idx <- setdiff(seq_len(nrow(data_dfs_noNLP)), 
+                             test_idx)
+
+        train_data <- data_dfs_noNLP[train_idx, ]
+        test_data  <- data_dfs_noNLP[test_idx, ]
+
+        fit <- run_cox_workflow(train_data,
+                                "years_to_dfs_event",
+                                "dfs_status")
+
+        if (is.na(fit)[1]){
+          NA
+        } else {
+          pred <- predict(fit, 
+                          newdata = test_data)
+          
+          risk <- -pred
+          
+          concordance(Surv(test_data$years_to_dfs_event,
+                           test_data$dfs_status) ~ risk)$concordance
+          
+        }})
+
+summary_dfs_noNLP <- tibble(
+  mean_c_index = mean(res_dfs_noNLP,
+                      na.rm = TRUE),
+  sd_c_index = sd(res_dfs_noNLP,
+                  na.rm = TRUE),
+  lower_95 = quantile(res_dfs_noNLP, 0.025,
+                      na.rm = TRUE),
+  upper_95 = quantile(res_dfs_noNLP, 0.975,
+                      na.rm = TRUE)) |> 
+  mutate(model = "Cox",
+         features = "noNLP",
+         outcome = "DFS",
+         setting = ifelse(regularization,
+                          case_when(alpha == 1 ~ "lasso",
+                                    alpha == 0.5 ~ "elastic-net",
+                                    TRUE ~ "ERROR"),
+                          ifelse(prevalence_filter,
+                                 "prevalence_filter",
+                                 "classic"))) |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, setting))
+
+summary_dfs_noNLP
+
+write_tsv(summary_dfs_noNLP,
+          file = "../results/05_cox_models_results.tsv",
+          append = TRUE)
+```
+
+## No genomic data
+
+```{r}
+#| label: predict_dfs_nogenomic
+#| echo: true
+#| warning: false
+
+res_dfs_nogenomic <- map_dbl(folds_dfs_nogenomic,
+                  ~ {
+                    
+        test_idx  <- .x
+        train_idx <- setdiff(seq_len(nrow(data_dfs_nogenomic)), 
+                             test_idx)
+
+        train_data <- data_dfs_nogenomic[train_idx, ]
+        test_data  <- data_dfs_nogenomic[test_idx, ]
+
+        fit <- run_cox_workflow(train_data,
+                                "years_to_dfs_event",
+                                "dfs_status")
+
+        if (is.na(fit)[1]){
+          NA
+        } else {
+          pred <- predict(fit, 
+                          newdata = test_data)
+          
+          risk <- -pred
+          
+          concordance(Surv(test_data$years_to_dfs_event,
+                           test_data$dfs_status) ~ risk)$concordance
+          
+        }})
+
+summary_dfs_nogenomic <- tibble(
+  mean_c_index = mean(res_dfs_nogenomic,
+                      na.rm = TRUE),
+  sd_c_index = sd(res_dfs_nogenomic,
+                  na.rm = TRUE),
+  lower_95 = quantile(res_dfs_nogenomic, 0.025,
+                      na.rm = TRUE),
+  upper_95 = quantile(res_dfs_nogenomic, 0.975,
+                      na.rm = TRUE)) |> 
+  mutate(model = "Cox",
+         features = "nogenomic",
+         outcome = "DFS",
+         setting = ifelse(regularization,
+                          case_when(alpha == 1 ~ "lasso",
+                                    alpha == 0.5 ~ "elastic-net",
+                                    TRUE ~ "ERROR"),
+                          ifelse(prevalence_filter,
+                                 "prevalence_filter",
+                                 "classic"))) |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, setting))
+
+summary_dfs_nogenomic
+
+write_tsv(summary_dfs_nogenomic,
+          file = "../results/05_cox_models_results.tsv",
+          append = TRUE)
+```
+
+## Only routine data
+
+```{r}
+#| label: predict_dfs_noNLPgenomic
+#| echo: true
+#| warning: false
+
+res_dfs_noNLPgenomic <- map_dbl(folds_dfs_noNLPgenomic,
+                  ~ {
+                    
+        test_idx  <- .x
+        train_idx <- setdiff(seq_len(nrow(data_dfs_noNLPgenomic)), 
+                             test_idx)
+
+        train_data <- data_dfs_noNLPgenomic[train_idx, ]
+        test_data  <- data_dfs_noNLPgenomic[test_idx, ]
+
+        fit <- run_cox_workflow(train_data,
+                                "years_to_dfs_event",
+                                "dfs_status")
+
+        if (is.na(fit)[1]){
+          NA
+        } else {
+          pred <- predict(fit, 
+                          newdata = test_data)
+          
+          risk <- -pred
+          
+          concordance(Surv(test_data$years_to_dfs_event,
+                           test_data$dfs_status) ~ risk)$concordance
+          
+        }})
+
+summary_dfs_noNLPgenomic <- tibble(
+  mean_c_index = mean(res_dfs_noNLPgenomic,
+                      na.rm = TRUE),
+  sd_c_index = sd(res_dfs_noNLPgenomic,
+                  na.rm = TRUE),
+  lower_95 = quantile(res_dfs_noNLPgenomic, 0.025,
+                      na.rm = TRUE),
+  upper_95 = quantile(res_dfs_noNLPgenomic, 0.975,
+                      na.rm = TRUE)) |> 
+  mutate(model = "Cox",
+         features = "noNLPgenomic",
+         outcome = "DFS",
+         setting = ifelse(regularization,
+                          case_when(alpha == 1 ~ "lasso",
+                                    alpha == 0.5 ~ "elastic-net",
+                                    TRUE ~ "ERROR"),
+                          ifelse(prevalence_filter,
+                                 "prevalence_filter",
+                                 "classic"))) |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, setting))
+
+summary_dfs_noNLPgenomic
+
+write_tsv(summary_dfs_noNLPgenomic,
+          file = "../results/05_cox_models_results.tsv",
+          append = TRUE)
+```

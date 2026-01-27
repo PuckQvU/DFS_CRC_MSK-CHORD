@@ -1,0 +1,674 @@
+---
+title: "Stepwise Cox models"
+author: "Puck Quarles van Ufford"
+date: today
+format: html
+---
+
+# Set up
+
+```{r}
+#| label: packages
+#| message: false
+#| echo: true
+
+library("tidyverse")
+library("survival")
+library("caret")
+```
+
+```{r}
+#| label: seed
+#| echo: true
+
+set.seed(8)
+```
+
+# Load data
+
+```{r}
+#| label: load_data
+#| message: false
+#| echo: true
+
+data_os <- read_tsv(file = "../data/03_data_train_os.tsv")
+data_os_noNLP <- read_tsv(file = "../data/03_data_train_os_noNLP.tsv")
+data_os_nogenomic <- read_tsv(file = "../data/03_data_train_os_nogenomic.tsv")
+data_os_noNLPgenomic <- read_tsv(file = "../data/03_data_train_os_noNLPgenomic.tsv")
+
+data_dfs <- read_tsv(file = "../data/03_data_train_dfs.tsv")
+data_dfs_noNLP <- read_tsv(file = "../data/03_data_train_dfs_noNLP.tsv")
+data_dfs_nogenomic <- read_tsv(file = "../data/03_data_train_dfs_nogenomic.tsv")
+data_dfs_noNLPgenomic <- read_tsv(file = "../data/03_data_train_dfs_noNLPgenomic.tsv")
+```
+
+# Settings
+
+```{r}
+#| label: settings
+#| echo: true
+
+max_iterations <- 10
+```
+
+# Set up cross-validation
+
+```{r}
+#| label: 5_fold_CV
+#| echo: true
+
+folds_os <- createFolds(data_os$os_status,
+                        k = 5,
+                        list = TRUE,
+                        returnTrain = FALSE)
+folds_os_noNLP <- createFolds(data_os_noNLP$os_status,
+                              k = 5,
+                              list = TRUE,
+                              returnTrain = FALSE)
+folds_os_nogenomic <- createFolds(data_os_nogenomic$os_status,
+                                  k = 5,
+                                  list = TRUE,
+                                  returnTrain = FALSE)
+folds_os_noNLPgenomic <- createFolds(data_os_noNLPgenomic$os_status,
+                                     k = 5,
+                                     list = TRUE,
+                                     returnTrain = FALSE)
+
+folds_dfs <- createFolds(data_dfs$dfs_status,
+                         k = 5,
+                         list = TRUE,
+                         returnTrain = FALSE)
+folds_dfs_noNLP <- createFolds(data_dfs_noNLP$dfs_status,
+                               k = 5,
+                               list = TRUE,
+                               returnTrain = FALSE)
+folds_dfs_nogenomic <- createFolds(data_dfs_nogenomic$dfs_status,
+                                   k = 5,
+                                   list = TRUE,
+                                   returnTrain = FALSE)
+folds_dfs_noNLPgenomic <- createFolds(data_dfs_noNLPgenomic$dfs_status,
+                                      k = 5,
+                                      list = TRUE,
+                                      returnTrain = FALSE)
+```
+
+# Forward stepwise Cox model workflow
+
+```{r}
+#| label: forward_stepwise_Cox_function
+#| echo: true
+
+forward_cox_cv <- function(data, 
+                           time_var,
+                           status_var, 
+                           folds, 
+                           max_iter = max_iterations) {
+
+  outcome_cols <- c(time_var, 
+                    status_var)
+  
+  all_features <- setdiff(colnames(data),
+                          c(outcome_cols, 
+                            "patient_id", 
+                            "sample_id"))
+
+  results <- list()
+
+  for (k in seq_along(folds)) {
+
+    test_idx  <- folds[[k]]
+    train_idx <- setdiff(seq_len(nrow(data)),
+                         test_idx)
+
+    data_train <- data[train_idx, ]
+    data_test  <- data[test_idx, ]
+
+    features_to_test <- all_features
+    added_features <- character()
+
+    max_iter_k <- min(length(all_features), 
+                      max_iter)
+
+    for (iter in seq_len(max_iter_k)) {
+
+      c_indices <- tibble(feature = character(),
+                          c_index = numeric())
+
+      for (f in features_to_test) {
+
+        formula <- as.formula(paste0(
+          "Surv(", time_var, ", ", status_var,  ") ~ ",
+          paste(c(added_features,
+                  f), 
+                collapse = " + ")))
+
+        model <- coxph(formula, 
+                       data = data_train)
+
+        c_index <- summary(model)$concordance[1]
+
+        c_indices <- add_row(c_indices,
+                             feature = f,
+                             c_index = c_index)
+      }
+
+      best_feature <- c_indices$feature[which.max(c_indices$c_index)]
+      
+      formula <- as.formula(paste0(
+        "Surv(", time_var, ", ", status_var,  ") ~ ",
+        paste(c(added_features,
+                best_feature), 
+              collapse = " + ")))
+      
+      model <- coxph(formula,
+                     data = data_train)
+      
+      prediction <- predict(model,
+                            newdata = data_test, 
+                            type = "lp")
+      
+      c_index <- survConcordance(as.formula(paste0(
+        "Surv(", time_var, ", ", status_var, ") ~ prediction")),
+        data = data_test)$concordance
+
+      results[[length(results) + 1]] <- tibble(
+        fold = k,
+        iteration = iter,
+        added_feature = best_feature,
+        c_index = c_index)
+
+      added_features <- c(added_features, 
+                          best_feature)
+      
+      features_to_test <- setdiff(features_to_test, 
+                                  best_feature)
+    }
+  }
+
+  bind_rows(results)
+}
+```
+
+# Predicting OS
+
+## All features
+
+```{r}
+#| label: predict_os
+#| echo: true
+#| warning: false
+
+res_os <- forward_cox_cv(data = data_os,
+                         time_var = "years_to_os_event",
+                         status_var = "os_status",
+                         folds = folds_os)
+
+write_tsv(x = res_os,
+         file = paste0("../results/06_res_per_fold_OS_",
+                       as.character(max_iterations),
+                       "_max.tsv"))
+
+summary_os <- res_os |> 
+  group_by(iteration) |> 
+  summarise(mean_c_index = mean(c_index),
+            sd_c_index = sd(c_index),
+            lower_95 = quantile(c_index, 0.025),
+            upper_95 = quantile(c_index, 0.975),
+            .groups = "drop")
+
+summary_os |> 
+  ggplot(mapping = aes(x = iteration, 
+                       y = mean_c_index)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower_95, 
+                  ymax = upper_95),
+              alpha = 0.2) +
+  labs(
+    x = "Number of features included",
+    y = "C-index (95% CI)",
+    title = "Forward stepwise Cox model (OS)",
+    subtitle = "Feature sets included: all"
+    ) +
+  theme_minimal()
+
+ggsave(paste0("../results/06_C_index_plot_OS_",
+              as.character(max_iterations),
+              "_max.png"))
+
+best_model_os <- summary_os |> 
+  filter(mean_c_index == max(mean_c_index)) |> 
+  mutate(model = "Forward_stepwise_Cox",
+         features = "all",
+         outcome = "OS") |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, iteration))
+
+write_tsv(best_model_os,
+          file = paste0("../results/06_stepwise_cox_models_results_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+```
+
+## No NLP data
+
+```{r}
+#| label: predict_os_noNLP
+#| echo: true
+#| warning: false
+
+res_os_noNLP <- forward_cox_cv(data = data_os_noNLP,
+                               time_var = "years_to_os_event",
+                               status_var = "os_status",
+                               folds = folds_os_noNLP)
+
+write_tsv(x = res_os_noNLP,
+          file = paste0("../results/06_res_per_fold_OS_noNLP_",
+                        as.character(max_iterations),
+                        "_max.tsv"))
+
+summary_os_noNLP <- res_os_noNLP |> 
+  group_by(iteration) |> 
+  summarise(mean_c_index = mean(c_index),
+            sd_c_index = sd(c_index),
+            lower_95 = quantile(c_index, 0.025),
+            upper_95 = quantile(c_index, 0.975),
+            .groups = "drop")
+
+summary_os_noNLP |> 
+  ggplot(mapping = aes(x = iteration, 
+                       y = mean_c_index)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower_95, 
+                  ymax = upper_95),
+              alpha = 0.2) +
+  labs(
+    x = "Number of features included",
+    y = "C-index (95% CI)",
+    title = "Forward stepwise Cox model (OS)",
+    subtitle = "Feature sets included: no NLP"
+    ) +
+  theme_minimal()
+
+ggsave(paste0("../results/06_C_index_plot_OS_noNLP_",
+              as.character(max_iterations),
+              "_max.png"))
+
+best_model_os_noNLP <- summary_os_noNLP |> 
+  filter(mean_c_index == max(mean_c_index)) |> 
+  mutate(model = "Forward_stepwise_Cox",
+         features = "noNLP",
+         outcome = "OS") |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, iteration))
+
+write_tsv(best_model_os_noNLP,
+          file = paste0("../results/06_stepwise_cox_models_results_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+```
+
+## No genomic data
+
+```{r}
+#| label: predict_os_nogenomic
+#| echo: true
+#| warning: false
+
+res_os_nogenomic <- forward_cox_cv(data = data_os_nogenomic,
+                                   time_var = "years_to_os_event",
+                                   status_var = "os_status",
+                                   folds = folds_os_nogenomic)
+
+write_tsv(x = res_os_nogenomic,
+          file = paste0("../results/06_res_per_fold_OS_nogenomic_",
+                        as.character(max_iterations),
+                        "_max.tsv"))
+
+summary_os_nogenomic <- res_os_nogenomic |> 
+  group_by(iteration) |> 
+  summarise(mean_c_index = mean(c_index),
+            sd_c_index = sd(c_index),
+            lower_95 = quantile(c_index, 0.025),
+            upper_95 = quantile(c_index, 0.975),
+            .groups = "drop")
+
+summary_os_nogenomic |> 
+  ggplot(mapping = aes(x = iteration, 
+                       y = mean_c_index)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower_95, 
+                  ymax = upper_95),
+              alpha = 0.2) +
+  labs(
+    x = "Number of features included",
+    y = "C-index (95% CI)",
+    title = "Forward stepwise Cox model (OS)",
+    subtitle = "Feature sets included: no genomic"
+    ) +
+  theme_minimal()
+
+ggsave(paste0("../results/06_C_index_plot_OS_nogenomic_",
+              as.character(max_iterations),
+              "_max.png"))
+
+best_model_os_nogenomic <- summary_os_nogenomic |> 
+  filter(mean_c_index == max(mean_c_index)) |> 
+  mutate(model = "Forward_stepwise_Cox",
+         features = "nogenomic",
+         outcome = "OS") |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, iteration))
+
+write_tsv(best_model_os_nogenomic,
+          file = paste0("../results/06_stepwise_cox_models_results_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+```
+
+## Only routine data
+
+```{r}
+#| label: predict_os_noNLPgenomic
+#| echo: true
+#| warning: false
+
+res_os_noNLPgenomic <- forward_cox_cv(data = data_os_noNLPgenomic,
+                                      time_var = "years_to_os_event",
+                                      status_var = "os_status",
+                                      folds = folds_os_noNLPgenomic)
+
+write_tsv(x = res_os_noNLPgenomic,
+          file = paste0("../results/06_res_per_fold_OS_noNLPgenomic_",
+                        as.character(max_iterations),
+                        "_max.tsv"))
+
+summary_os_noNLPgenomic <- res_os_noNLPgenomic |> 
+  group_by(iteration) |> 
+  summarise(mean_c_index = mean(c_index),
+            sd_c_index = sd(c_index),
+            lower_95 = quantile(c_index, 0.025),
+            upper_95 = quantile(c_index, 0.975),
+            .groups = "drop")
+
+summary_os_noNLPgenomic |> 
+  ggplot(mapping = aes(x = iteration, 
+                       y = mean_c_index)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower_95, 
+                  ymax = upper_95),
+              alpha = 0.2) +
+  labs(
+    x = "Number of features included",
+    y = "C-index (95% CI)",
+    title = "Forward stepwise Cox model (OS)",
+    subtitle = "Feature sets included: no NLP or genomic"
+    ) +
+  theme_minimal()
+
+ggsave(paste0("../results/06_C_index_plot_OS_noNLPgenomic_",
+              as.character(max_iterations),
+              "_max.png"))
+
+best_model_os_noNLPgenomic <- summary_os_noNLPgenomic |> 
+  filter(mean_c_index == max(mean_c_index)) |> 
+  mutate(model = "Forward_stepwise_Cox",
+         features = "noNLPgenomic",
+         outcome = "OS") |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, iteration))
+
+write_tsv(best_model_os_noNLPgenomic,
+          file = paste0("../results/06_stepwise_cox_models_results_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+```
+
+# Predicting DFS
+
+## All features
+
+```{r}
+#| label: predict_dfs
+#| echo: true
+#| warning: false
+
+res_dfs <- forward_cox_cv(data = data_dfs,
+                          time_var = "years_to_dfs_event",
+                          status_var = "dfs_status",
+                          folds = folds_dfs)
+
+write_tsv(x = res_dfs,
+          file = paste0("../results/06_res_per_fold_DFS_",
+                        as.character(max_iterations),
+                        "_max.tsv"))
+
+summary_dfs <- res_dfs |> 
+  group_by(iteration) |> 
+  summarise(mean_c_index = mean(c_index),
+            sd_c_index = sd(c_index),
+            lower_95 = quantile(c_index, 0.025),
+            upper_95 = quantile(c_index, 0.975),
+            .groups = "drop")
+
+summary_dfs |> 
+  ggplot(mapping = aes(x = iteration, 
+                       y = mean_c_index)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower_95, 
+                  ymax = upper_95),
+              alpha = 0.2) +
+  labs(
+    x = "Number of features included",
+    y = "C-index (95% CI)",
+    title = "Forward stepwise Cox model (DFS)",
+    subtitle = "Feature sets included: all"
+    ) +
+  theme_minimal()
+
+ggsave(paste0("../results/06_C_index_plot_DFS_",
+              as.character(max_iterations),
+              "_max.png"))
+
+best_model_dfs <- summary_dfs |> 
+  filter(mean_c_index == max(mean_c_index)) |> 
+  mutate(model = "Forward_stepwise_Cox",
+         features = "all",
+         outcome = "DFS") |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, iteration))
+
+write_tsv(best_model_dfs,
+          file = paste0("../results/06_stepwise_cox_models_results_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+```
+
+## No NLP data
+
+```{r}
+#| label: predict_dfs_noNLP
+#| echo: true
+#| warning: false
+
+res_dfs_noNLP <- forward_cox_cv(data = data_dfs_noNLP,
+                                time_var = "years_to_dfs_event",
+                                status_var = "dfs_status",
+                                folds = folds_dfs_noNLP)
+
+write_tsv(x = res_dfs_noNLP,
+          file = paste0("../results/06_res_per_fold_DFS_noNLP_",
+                        as.character(max_iterations),
+                        "_max.tsv"))
+
+summary_dfs_noNLP <- res_dfs_noNLP |> 
+  group_by(iteration) |> 
+  summarise(mean_c_index = mean(c_index),
+            sd_c_index = sd(c_index),
+            lower_95 = quantile(c_index, 0.025),
+            upper_95 = quantile(c_index, 0.975),
+            .groups = "drop")
+
+summary_dfs_noNLP |> 
+  ggplot(mapping = aes(x = iteration, 
+                       y = mean_c_index)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower_95, 
+                  ymax = upper_95),
+              alpha = 0.2) +
+  labs(
+    x = "Number of features included",
+    y = "C-index (95% CI)",
+    title = "Forward stepwise Cox model (DFS)",
+    subtitle = "Feature sets included: no NLP"
+    ) +
+  theme_minimal()
+
+ggsave(paste0("../results/06_C_index_plot_DFS_noNLP_",
+              as.character(max_iterations),
+              "_max.png"))
+
+best_model_dfs_noNLP <- summary_dfs_noNLP |> 
+  filter(mean_c_index == max(mean_c_index)) |> 
+  mutate(model = "Forward_stepwise_Cox",
+         features = "noNLP",
+         outcome = "DFS") |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, iteration))
+
+write_tsv(best_model_dfs_noNLP,
+          file = paste0("../results/06_stepwise_cox_models_results_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+```
+
+## No genomic data
+
+```{r}
+#| label: predict_dfs_nogenomic
+#| echo: true
+#| warning: false
+
+res_dfs_nogenomic <- forward_cox_cv(data = data_dfs_nogenomic,
+                                    time_var = "years_to_dfs_event",
+                                    status_var = "dfs_status",
+                                    folds = folds_dfs_nogenomic)
+
+write_tsv(x = res_dfs_nogenomic,
+          file = paste0("../results/06_res_per_fold_DFS_nogenomic_",
+                        as.character(max_iterations),
+                        "_max.tsv"))
+
+summary_dfs_nogenomic <- res_dfs_nogenomic |> 
+  group_by(iteration) |> 
+  summarise(mean_c_index = mean(c_index),
+            sd_c_index = sd(c_index),
+            lower_95 = quantile(c_index, 0.025),
+            upper_95 = quantile(c_index, 0.975),
+            .groups = "drop")
+
+summary_dfs_nogenomic |> 
+  ggplot(mapping = aes(x = iteration, 
+                       y = mean_c_index)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower_95, 
+                  ymax = upper_95),
+              alpha = 0.2) +
+  labs(
+    x = "Number of features included",
+    y = "C-index (95% CI)",
+    title = "Forward stepwise Cox model (DFS)",
+    subtitle = "Feature sets included: no genomic"
+    ) +
+  theme_minimal()
+
+ggsave(paste0("../results/06_C_index_plot_DFS_nogenomic_",
+              as.character(max_iterations),
+              "_max.png"))
+
+best_model_dfs_nogenomic <- summary_dfs_nogenomic |> 
+  filter(mean_c_index == max(mean_c_index)) |> 
+  mutate(model = "Forward_stepwise_Cox",
+         features = "nogenomic",
+         outcome = "DFS") |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, iteration))
+
+write_tsv(best_model_dfs_nogenomic,
+          file = paste0("../results/06_stepwise_cox_models_results_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+```
+
+## Only routine data
+
+```{r}
+#| label: predict_dfs_noNLPgenomic
+#| echo: true
+#| warning: false
+
+res_dfs_noNLPgenomic <- forward_cox_cv(data = data_dfs_noNLPgenomic,
+                                       time_var = "years_to_dfs_event",
+                                       status_var = "dfs_status",
+                                       folds = folds_dfs_noNLPgenomic)
+
+write_tsv(x = res_dfs_noNLPgenomic,
+          file = paste0("../results/06_res_per_fold_DFS_noNLPgenomic_",
+                        as.character(max_iterations),
+                        "_max.tsv"))
+
+summary_dfs_noNLPgenomic <- res_dfs_noNLPgenomic |> 
+  group_by(iteration) |> 
+  summarise(mean_c_index = mean(c_index),
+            sd_c_index = sd(c_index),
+            lower_95 = quantile(c_index, 0.025),
+            upper_95 = quantile(c_index, 0.975),
+            .groups = "drop")
+
+summary_dfs_noNLPgenomic |> 
+  ggplot(mapping = aes(x = iteration, 
+                       y = mean_c_index)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower_95, 
+                  ymax = upper_95),
+              alpha = 0.2) +
+  labs(
+    x = "Number of features included",
+    y = "C-index (95% CI)",
+    title = "Forward stepwise Cox model (DFS)",
+    subtitle = "Feature sets included: no NLP or genomic"
+    ) +
+  theme_minimal()
+
+ggsave(paste0("../results/06_C_index_plot_DFS_noNLPgenomic_",
+              as.character(max_iterations),
+              "_max.png"))
+
+best_model_dfs_noNLPgenomic <- summary_dfs_noNLPgenomic |> 
+  filter(mean_c_index == max(mean_c_index)) |> 
+  mutate(model = "Forward_stepwise_Cox",
+         features = "noNLPgenomic",
+         outcome = "DFS") |> 
+  select(c(model, features, outcome, 
+           mean_c_index, sd_c_index,
+           lower_95, upper_95, iteration))
+
+write_tsv(best_model_dfs_noNLPgenomic,
+          file = paste0("../results/06_stepwise_cox_models_results_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+```
