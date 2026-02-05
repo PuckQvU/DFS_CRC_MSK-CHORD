@@ -16,6 +16,7 @@ library("tidyverse")
 library("glmnet")
 library("survival")
 library("caret")
+library("pROC")
 ```
 
 ```{r}
@@ -49,143 +50,18 @@ data_dfs_noNLPgenomic <- read_tsv(file = "../data/03_data_train_dfs_noNLPgenomic
 #| label: settings
 #| echo: true
 
-regularization <- TRUE
+regularization <- FALSE
 alpha <- 1 # 0.5 for elastic-net, 1 for lasso, 0 for ridge
 
-prevalence_filter <- FALSE
-prevalence_threshold <- 0.95
-
 p_value_threshold <- 0.05
-```
 
-# Prevalence filter
+setting <- ifelse(regularization,
+                  case_when(alpha == 1 ~ "lasso",
+                            alpha == 0.5 ~ "elastic-net",
+                            TRUE ~ "ERROR"),
+                  "classic")
 
-```{r}
-#| label: prevalence_filter
-#| message: false
-#| echo: true
-
-if(prevalence_filter){
-  # OS
-  col_prevalence <- data_os |> 
-    summarise(across(everything(),
-                     ~ max(table(.)/n()))) |> 
-    pivot_longer(everything(),
-                 names_to = "column",
-                 values_to = "prevalence")
-  
-  cols_to_keep <- col_prevalence |> 
-    filter(prevalence <= prevalence_threshold) |> 
-    pull(column)
-    
-  data_os <- data_os |> 
-    select(all_of(cols_to_keep))
-  
-  # OS no NLP
-  col_prevalence <- data_os_noNLP |> 
-    summarise(across(everything(),
-                     ~ max(table(.)/n()))) |> 
-    pivot_longer(everything(),
-                 names_to = "column",
-                 values_to = "prevalence")
-  
-  cols_to_keep <- col_prevalence |> 
-    filter(prevalence <= prevalence_threshold) |> 
-    pull(column)
-    
-  data_os_noNLP <- data_os_noNLP |> 
-    select(all_of(cols_to_keep))
-  
-  # OS no genomic
-  col_prevalence <- data_os_nogenomic |> 
-    summarise(across(everything(),
-                     ~ max(table(.)/n()))) |> 
-    pivot_longer(everything(),
-                 names_to = "column",
-                 values_to = "prevalence")
-  
-  cols_to_keep <- col_prevalence |> 
-    filter(prevalence <= prevalence_threshold) |> 
-    pull(column)
-    
-  data_os_nogenomic <- data_os_nogenomic |> 
-    select(all_of(cols_to_keep))
-  
-  # OS routine data
-  col_prevalence <- data_os_noNLPgenomic |> 
-    summarise(across(everything(),
-                     ~ max(table(.)/n()))) |> 
-    pivot_longer(everything(),
-                 names_to = "column",
-                 values_to = "prevalence")
-  
-  cols_to_keep <- col_prevalence |> 
-    filter(prevalence <= prevalence_threshold) |> 
-    pull(column)
-    
-  data_os_noNLPgenomic <- data_os_noNLPgenomic |> 
-    select(all_of(cols_to_keep))
-  
-  # DFS
-  col_prevalence <- data_dfs |> 
-    summarise(across(everything(),
-                     ~ max(table(.)/n()))) |> 
-    pivot_longer(everything(),
-                 names_to = "column",
-                 values_to = "prevalence")
-  
-  cols_to_keep <- col_prevalence |> 
-    filter(prevalence <= prevalence_threshold) |> 
-    pull(column)
-    
-  data_dfs <- data_dfs |> 
-    select(all_of(cols_to_keep))
-  
-  # DFS no NLP
-  col_prevalence <- data_dfs_noNLP |> 
-    summarise(across(everything(),
-                     ~ max(table(.)/n()))) |> 
-    pivot_longer(everything(),
-                 names_to = "column",
-                 values_to = "prevalence")
-  
-  cols_to_keep <- col_prevalence |> 
-    filter(prevalence <= prevalence_threshold) |> 
-    pull(column)
-    
-  data_dfs_noNLP <- data_dfs_noNLP |> 
-    select(all_of(cols_to_keep))
-  
-  # DFS no genomic
-  col_prevalence <- data_dfs_nogenomic |> 
-    summarise(across(everything(),
-                     ~ max(table(.)/n()))) |> 
-    pivot_longer(everything(),
-                 names_to = "column",
-                 values_to = "prevalence")
-  
-  cols_to_keep <- col_prevalence |> 
-    filter(prevalence <= prevalence_threshold) |> 
-    pull(column)
-    
-  data_dfs_nogenomic <- data_dfs_nogenomic |> 
-    select(all_of(cols_to_keep))
-  
-  # DFS routine data
-  col_prevalence <- data_dfs_noNLPgenomic |> 
-    summarise(across(everything(),
-                     ~ max(table(.)/n()))) |> 
-    pivot_longer(everything(),
-                 names_to = "column",
-                 values_to = "prevalence")
-  
-  cols_to_keep <- col_prevalence |> 
-    filter(prevalence <= prevalence_threshold) |> 
-    pull(column)
-    
-  data_dfs_noNLPgenomic <- data_dfs_noNLPgenomic |> 
-    select(all_of(cols_to_keep))
-}
+setting
 ```
 
 # Set up cross-validation
@@ -340,60 +216,127 @@ run_cox_workflow <- function(data,
 #| echo: true
 #| warning: false
 
-res_os <- map_dbl(folds_os,
-                  ~ {
-                    
-        test_idx  <- .x
-        train_idx <- setdiff(seq_len(nrow(data_os)), 
-                             test_idx)
+results_os <- imap(
+  folds_os,
+  ~ {
+    fold_idx <- .x
+    fold_num <- .y
 
-        train_data <- data_os[train_idx, ]
-        test_data  <- data_os[test_idx, ]
+    # Split train / test
+    train_idx <- setdiff(seq_len(nrow(data_os)), 
+                         fold_idx)
+    train_data <- data_os[train_idx, ]
+    test_data  <- data_os[fold_idx, ]
 
-        fit <- run_cox_workflow(train_data,
-                                "years_to_os_event",
-                                "os_status")
-        
-        if (is.na(fit)[1]){
-          NA
-        } else {
-          pred <- predict(fit, 
-                          newdata = test_data)
-          
-          risk <- -pred
-          
-          concordance(Surv(test_data$years_to_os_event,
-                           test_data$os_status) ~ risk)$concordance
-          
-        }})
+    # Fit model
+    fit <- run_cox_workflow(train_data,
+                            "years_to_os_event",
+                            "os_status")
 
-summary_os <- tibble(
-  mean_c_index = mean(res_os,
-                      na.rm = TRUE),
-  sd_c_index = sd(res_os,
-                  na.rm = TRUE),
-  lower_95 = quantile(res_os, 0.025,
-                      na.rm = TRUE),
-  upper_95 = quantile(res_os, 0.975,
-                      na.rm = TRUE)) |> 
-  mutate(model = "Cox",
-         features = "all",
+    if (is.na(fit)[1]) return(NULL)
+
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred
+
+    predictions <- tibble(
+      fold = fold_num,
+      id = test_data$patient_id,
+      os_status = test_data$os_status,
+      years_to_os_event = test_data$years_to_os_event,
+      risk = risk
+    )
+
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_os_event, 
+           test_data$os_status) ~ risk
+    )$concordance
+
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_os_event <= t & test_data$os_status == 1 ~ 1,
+        test_data$years_to_os_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(response = status_t[keep],
+              predictor = risk[keep],
+              quiet = TRUE)$auc
+        )
+      }
+    }
+
+    auc_12_months <- compute_auc(1)
+    auc_18_months <- compute_auc(1.5)
+    auc_24_months <- compute_auc(2)
+    auc_36_months <- compute_auc(3)
+
+    metrics <- tibble(
+      fold = fold_num,
+      c_index = c_index,
+      auc_12_months = auc_12_months,
+      auc_18_months = auc_18_months,
+      auc_24_months = auc_24_months,
+      auc_36_months = auc_36_months
+    )
+
+    # Store coefficients
+    coefs <- summary(fit)$coefficients
+    coefs <- tibble(
+      fold = fold_num,
+      feature = rownames(coefs),
+      beta = coefs[, "coef"],
+      p_value = coefs[, "Pr(>|z|)"]
+    )
+
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      coefficients = coefs
+    )
+  }
+)
+
+predictions_os <- map_dfr(results_os, "predictions") |> 
+  mutate(model = setting,
          outcome = "OS",
-         setting = ifelse(regularization,
-                          case_when(alpha == 1 ~ "lasso",
-                                    alpha == 0.5 ~ "elastic-net",
-                                    TRUE ~ "ERROR"),
-                          ifelse(prevalence_filter,
-                                 "prevalence_filter",
-                                 "classic"))) |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, setting))
+         features = "all")
 
-summary_os
+predictions_os
 
-write_tsv(summary_os,
-          file = "../results/05_cox_models_results.tsv",
+write_tsv(predictions_os,
+          file = "../results/05_cox_predictions.tsv",
+          append = TRUE)
+
+metrics_os <- map_dfr(results_os, "metrics") |> 
+  mutate(model = setting,
+         outcome = "OS",
+         features = "all")
+
+metrics_os
+
+write_tsv(metrics_os,
+          file = "../results/05_cox_results.tsv",
+          append = TRUE)
+
+
+coefficients_os <- map_dfr(results_os, "coefficients") |> 
+  mutate(model = setting,
+         outcome = "OS",
+         features = "all")
+
+coefficients_os
+
+write_tsv(coefficients_os,
+          file = "../results/05_cox_coefs.tsv",
           append = TRUE)
 ```
 
@@ -404,60 +347,127 @@ write_tsv(summary_os,
 #| echo: true
 #| warning: false
 
-res_os_noNLP <- map_dbl(folds_os_noNLP,
-                  ~ {
-                    
-        test_idx  <- .x
-        train_idx <- setdiff(seq_len(nrow(data_os_noNLP)), 
-                             test_idx)
+results_os_noNLP <- imap(
+  folds_os_noNLP,
+  ~ {
+    fold_idx <- .x
+    fold_num <- .y
+    
+    # Split train / test
+    train_idx <- setdiff(seq_len(nrow(data_os_noNLP)), 
+                         fold_idx)
+    train_data <- data_os_noNLP[train_idx, ]
+    test_data  <- data_os_noNLP[fold_idx, ]
+    
+    # Fit model
+    fit <- run_cox_workflow(train_data,
+                            "years_to_os_event",
+                            "os_status")
+    
+    if (is.na(fit)[1]) return(NULL)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred
+    
+    predictions <- tibble(
+      fold = fold_num,
+      id = test_data$patient_id,
+      os_status = test_data$os_status,
+      years_to_os_event = test_data$years_to_os_event,
+      risk = risk
+    )
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_os_event, 
+           test_data$os_status) ~ risk
+    )$concordance
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_os_event <= t & test_data$os_status == 1 ~ 1,
+        test_data$years_to_os_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(response = status_t[keep],
+              predictor = risk[keep],
+              quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    auc_12_months <- compute_auc(1)
+    auc_18_months <- compute_auc(1.5)
+    auc_24_months <- compute_auc(2)
+    auc_36_months <- compute_auc(3)
+    
+    metrics <- tibble(
+      fold = fold_num,
+      c_index = c_index,
+      auc_12_months = auc_12_months,
+      auc_18_months = auc_18_months,
+      auc_24_months = auc_24_months,
+      auc_36_months = auc_36_months
+    )
+    
+    # Store coefficients
+    coefs <- summary(fit)$coefficients
+    coefs <- tibble(
+      fold = fold_num,
+      feature = rownames(coefs),
+      beta = coefs[, "coef"],
+      p_value = coefs[, "Pr(>|z|)"]
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      coefficients = coefs
+    )
+  }
+)
 
-        train_data <- data_os_noNLP[train_idx, ]
-        test_data  <- data_os_noNLP[test_idx, ]
-
-        fit <- run_cox_workflow(train_data,
-                                "years_to_os_event",
-                                "os_status")
-
-        if (is.na(fit)[1]){
-          NA
-        } else {
-          pred <- predict(fit, 
-                          newdata = test_data)
-          
-          risk <- -pred
-          
-          concordance(Surv(test_data$years_to_os_event,
-                           test_data$os_status) ~ risk)$concordance
-          
-        }})
-
-summary_os_noNLP <- tibble(
-  mean_c_index = mean(res_os_noNLP,
-                      na.rm = TRUE),
-  sd_c_index = sd(res_os_noNLP,
-                  na.rm = TRUE),
-  lower_95 = quantile(res_os_noNLP, 0.025,
-                      na.rm = TRUE),
-  upper_95 = quantile(res_os_noNLP, 0.975,
-                      na.rm = TRUE)) |> 
-  mutate(model = "Cox",
-         features = "noNLP",
+predictions_os_noNLP <- map_dfr(results_os_noNLP, "predictions") |> 
+  mutate(model = setting,
          outcome = "OS",
-         setting = ifelse(regularization,
-                          case_when(alpha == 1 ~ "lasso",
-                                    alpha == 0.5 ~ "elastic-net",
-                                    TRUE ~ "ERROR"),
-                          ifelse(prevalence_filter,
-                                 "prevalence_filter",
-                                 "classic"))) |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, setting))
+         features = "noNLP")
 
-summary_os_noNLP
+predictions_os_noNLP
 
-write_tsv(summary_os_noNLP,
-          file = "../results/05_cox_models_results.tsv",
+write_tsv(predictions_os_noNLP,
+          file = "../results/05_cox_predictions.tsv",
+          append = TRUE)
+
+metrics_os_noNLP <- map_dfr(results_os_noNLP, "metrics") |> 
+  mutate(model = setting,
+         outcome = "OS",
+         features = "noNLP")
+
+metrics_os_noNLP
+
+write_tsv(metrics_os_noNLP,
+          file = "../results/05_cox_results.tsv",
+          append = TRUE)
+
+
+coefficients_os_noNLP <- map_dfr(results_os_noNLP, "coefficients") |> 
+  mutate(model = setting,
+         outcome = "OS",
+         features = "noNLP")
+
+coefficients_os_noNLP
+
+write_tsv(coefficients_os_noNLP,
+          file = "../results/05_cox_coefs.tsv",
           append = TRUE)
 ```
 
@@ -468,60 +478,127 @@ write_tsv(summary_os_noNLP,
 #| echo: true
 #| warning: false
 
-res_os_nogenomic <- map_dbl(folds_os_nogenomic,
-                  ~ {
-                    
-        test_idx  <- .x
-        train_idx <- setdiff(seq_len(nrow(data_os_nogenomic)), 
-                             test_idx)
+results_os_nogenomic <- imap(
+  folds_os_nogenomic,
+  ~ {
+    fold_idx <- .x
+    fold_num <- .y
+    
+    # Split train / test
+    train_idx <- setdiff(seq_len(nrow(data_os_nogenomic)), 
+                         fold_idx)
+    train_data <- data_os_nogenomic[train_idx, ]
+    test_data  <- data_os_nogenomic[fold_idx, ]
+    
+    # Fit model
+    fit <- run_cox_workflow(train_data,
+                            "years_to_os_event",
+                            "os_status")
+    
+    if (is.na(fit)[1]) return(NULL)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred
+    
+    predictions <- tibble(
+      fold = fold_num,
+      id = test_data$patient_id,
+      os_status = test_data$os_status,
+      years_to_os_event = test_data$years_to_os_event,
+      risk = risk
+    )
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_os_event, 
+           test_data$os_status) ~ risk
+    )$concordance
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_os_event <= t & test_data$os_status == 1 ~ 1,
+        test_data$years_to_os_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(response = status_t[keep],
+              predictor = risk[keep],
+              quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    auc_12_months <- compute_auc(1)
+    auc_18_months <- compute_auc(1.5)
+    auc_24_months <- compute_auc(2)
+    auc_36_months <- compute_auc(3)
+    
+    metrics <- tibble(
+      fold = fold_num,
+      c_index = c_index,
+      auc_12_months = auc_12_months,
+      auc_18_months = auc_18_months,
+      auc_24_months = auc_24_months,
+      auc_36_months = auc_36_months
+    )
+    
+    # Store coefficients
+    coefs <- summary(fit)$coefficients
+    coefs <- tibble(
+      fold = fold_num,
+      feature = rownames(coefs),
+      beta = coefs[, "coef"],
+      p_value = coefs[, "Pr(>|z|)"]
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      coefficients = coefs
+    )
+  }
+)
 
-        train_data <- data_os_nogenomic[train_idx, ]
-        test_data  <- data_os_nogenomic[test_idx, ]
-
-        fit <- run_cox_workflow(train_data,
-                                "years_to_os_event",
-                                "os_status")
-
-        if (is.na(fit)[1]){
-          NA
-        } else {
-          pred <- predict(fit, 
-                          newdata = test_data)
-          
-          risk <- -pred
-          
-          concordance(Surv(test_data$years_to_os_event,
-                           test_data$os_status) ~ risk)$concordance
-          
-        }})
-
-summary_os_nogenomic <- tibble(
-  mean_c_index = mean(res_os_nogenomic,
-                      na.rm = TRUE),
-  sd_c_index = sd(res_os_nogenomic,
-                  na.rm = TRUE),
-  lower_95 = quantile(res_os_nogenomic, 0.025,
-                      na.rm = TRUE),
-  upper_95 = quantile(res_os_nogenomic, 0.975,
-                      na.rm = TRUE)) |> 
-  mutate(model = "Cox",
-         features = "nogenomic",
+predictions_os_nogenomic <- map_dfr(results_os_nogenomic, "predictions") |> 
+  mutate(model = setting,
          outcome = "OS",
-         setting = ifelse(regularization,
-                          case_when(alpha == 1 ~ "lasso",
-                                    alpha == 0.5 ~ "elastic-net",
-                                    TRUE ~ "ERROR"),
-                          ifelse(prevalence_filter,
-                                 "prevalence_filter",
-                                 "classic"))) |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, setting))
+         features = "nogenomic")
 
-summary_os_nogenomic
+predictions_os_nogenomic
 
-write_tsv(summary_os_nogenomic,
-          file = "../results/05_cox_models_results.tsv",
+write_tsv(predictions_os_nogenomic,
+          file = "../results/05_cox_predictions.tsv",
+          append = TRUE)
+
+metrics_os_nogenomic <- map_dfr(results_os_nogenomic, "metrics") |> 
+  mutate(model = setting,
+         outcome = "OS",
+         features = "nogenomic")
+
+metrics_os_nogenomic
+
+write_tsv(metrics_os_nogenomic,
+          file = "../results/05_cox_results.tsv",
+          append = TRUE)
+
+
+coefficients_os_nogenomic <- map_dfr(results_os_nogenomic, "coefficients") |> 
+  mutate(model = setting,
+         outcome = "OS",
+         features = "nogenomic")
+
+coefficients_os_nogenomic
+
+write_tsv(coefficients_os_nogenomic,
+          file = "../results/05_cox_coefs.tsv",
           append = TRUE)
 ```
 
@@ -532,60 +609,127 @@ write_tsv(summary_os_nogenomic,
 #| echo: true
 #| warning: false
 
-res_os_noNLPgenomic <- map_dbl(folds_os_noNLPgenomic,
-                  ~ {
-                    
-        test_idx  <- .x
-        train_idx <- setdiff(seq_len(nrow(data_os_noNLPgenomic)), 
-                             test_idx)
+results_os_noNLPgenomic <- imap(
+  folds_os_noNLPgenomic,
+  ~ {
+    fold_idx <- .x
+    fold_num <- .y
+    
+    # Split train / test
+    train_idx <- setdiff(seq_len(nrow(data_os_noNLPgenomic)), 
+                         fold_idx)
+    train_data <- data_os_noNLPgenomic[train_idx, ]
+    test_data  <- data_os_noNLPgenomic[fold_idx, ]
+    
+    # Fit model
+    fit <- run_cox_workflow(train_data,
+                            "years_to_os_event",
+                            "os_status")
+    
+    if (is.na(fit)[1]) return(NULL)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred
+    
+    predictions <- tibble(
+      fold = fold_num,
+      id = test_data$patient_id,
+      os_status = test_data$os_status,
+      years_to_os_event = test_data$years_to_os_event,
+      risk = risk
+    )
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_os_event, 
+           test_data$os_status) ~ risk
+    )$concordance
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_os_event <= t & test_data$os_status == 1 ~ 1,
+        test_data$years_to_os_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(response = status_t[keep],
+              predictor = risk[keep],
+              quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    auc_12_months <- compute_auc(1)
+    auc_18_months <- compute_auc(1.5)
+    auc_24_months <- compute_auc(2)
+    auc_36_months <- compute_auc(3)
+    
+    metrics <- tibble(
+      fold = fold_num,
+      c_index = c_index,
+      auc_12_months = auc_12_months,
+      auc_18_months = auc_18_months,
+      auc_24_months = auc_24_months,
+      auc_36_months = auc_36_months
+    )
+    
+    # Store coefficients
+    coefs <- summary(fit)$coefficients
+    coefs <- tibble(
+      fold = fold_num,
+      feature = rownames(coefs),
+      beta = coefs[, "coef"],
+      p_value = coefs[, "Pr(>|z|)"]
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      coefficients = coefs
+    )
+  }
+)
 
-        train_data <- data_os_noNLPgenomic[train_idx, ]
-        test_data  <- data_os_noNLPgenomic[test_idx, ]
-
-        fit <- run_cox_workflow(train_data,
-                                "years_to_os_event",
-                                "os_status")
-
-        if (is.na(fit)[1]){
-          NA
-        } else {
-          pred <- predict(fit, 
-                          newdata = test_data)
-          
-          risk <- -pred
-          
-          concordance(Surv(test_data$years_to_os_event,
-                           test_data$os_status) ~ risk)$concordance
-          
-        }})
-
-summary_os_noNLPgenomic <- tibble(
-  mean_c_index = mean(res_os_noNLPgenomic,
-                      na.rm = TRUE),
-  sd_c_index = sd(res_os_noNLPgenomic,
-                  na.rm = TRUE),
-  lower_95 = quantile(res_os_noNLPgenomic, 0.025,
-                      na.rm = TRUE),
-  upper_95 = quantile(res_os_noNLPgenomic, 0.975,
-                      na.rm = TRUE)) |> 
-  mutate(model = "Cox",
-         features = "noNLPgenomic",
+predictions_os_noNLPgenomic <- map_dfr(results_os_noNLPgenomic, "predictions") |> 
+  mutate(model = setting,
          outcome = "OS",
-         setting = ifelse(regularization,
-                          case_when(alpha == 1 ~ "lasso",
-                                    alpha == 0.5 ~ "elastic-net",
-                                    TRUE ~ "ERROR"),
-                          ifelse(prevalence_filter,
-                                 "prevalence_filter",
-                                 "classic"))) |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, setting))
+         features = "noNLPgenomic")
 
-summary_os_noNLPgenomic
+predictions_os_noNLPgenomic
 
-write_tsv(summary_os_noNLPgenomic,
-          file = "../results/05_cox_models_results.tsv",
+write_tsv(predictions_os_noNLPgenomic,
+          file = "../results/05_cox_predictions.tsv",
+          append = TRUE)
+
+metrics_os_noNLPgenomic <- map_dfr(results_os_noNLPgenomic, "metrics") |> 
+  mutate(model = setting,
+         outcome = "OS",
+         features = "noNLPgenomic")
+
+metrics_os_noNLPgenomic
+
+write_tsv(metrics_os_noNLPgenomic,
+          file = "../results/05_cox_results.tsv",
+          append = TRUE)
+
+
+coefficients_os_noNLPgenomic <- map_dfr(results_os_noNLPgenomic, "coefficients") |> 
+  mutate(model = setting,
+         outcome = "OS",
+         features = "noNLPgenomic")
+
+coefficients_os_noNLPgenomic
+
+write_tsv(coefficients_os_noNLPgenomic,
+          file = "../results/05_cox_coefs.tsv",
           append = TRUE)
 ```
 
@@ -598,60 +742,127 @@ write_tsv(summary_os_noNLPgenomic,
 #| echo: true
 #| warning: false
 
-res_dfs <- map_dbl(folds_dfs,
-                  ~ {
-                    
-        test_idx  <- .x
-        train_idx <- setdiff(seq_len(nrow(data_dfs)), 
-                             test_idx)
+results_dfs <- imap(
+  folds_dfs,
+  ~ {
+    fold_idx <- .x
+    fold_num <- .y
+    
+    # Split train / test
+    train_idx <- setdiff(seq_len(nrow(data_dfs)), 
+                         fold_idx)
+    train_data <- data_dfs[train_idx, ]
+    test_data  <- data_dfs[fold_idx, ]
+    
+    # Fit model
+    fit <- run_cox_workflow(train_data,
+                            "years_to_dfs_event",
+                            "dfs_status")
+    
+    if (is.na(fit)[1]) return(NULL)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred
+    
+    predictions <- tibble(
+      fold = fold_num,
+      id = test_data$patient_id,
+      dfs_status = test_data$dfs_status,
+      years_to_dfs_event = test_data$years_to_dfs_event,
+      risk = risk
+    )
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_dfs_event, 
+           test_data$dfs_status) ~ risk
+    )$concordance
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_dfs_event <= t & test_data$dfs_status == 1 ~ 1,
+        test_data$years_to_dfs_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(response = status_t[keep],
+              predictor = risk[keep],
+              quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    auc_12_months <- compute_auc(1)
+    auc_18_months <- compute_auc(1.5)
+    auc_24_months <- compute_auc(2)
+    auc_36_months <- compute_auc(3)
+    
+    metrics <- tibble(
+      fold = fold_num,
+      c_index = c_index,
+      auc_12_months = auc_12_months,
+      auc_18_months = auc_18_months,
+      auc_24_months = auc_24_months,
+      auc_36_months = auc_36_months
+    )
+    
+    # Store coefficients
+    coefs <- summary(fit)$coefficients
+    coefs <- tibble(
+      fold = fold_num,
+      feature = rownames(coefs),
+      beta = coefs[, "coef"],
+      p_value = coefs[, "Pr(>|z|)"]
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      coefficients = coefs
+    )
+  }
+)
 
-        train_data <- data_dfs[train_idx, ]
-        test_data  <- data_dfs[test_idx, ]
-
-        fit <- run_cox_workflow(train_data,
-                                "years_to_dfs_event",
-                                "dfs_status")
-
-        if (is.na(fit)[1]){
-          NA
-        } else {
-          pred <- predict(fit, 
-                          newdata = test_data)
-          
-          risk <- -pred
-          
-          concordance(Surv(test_data$years_to_dfs_event,
-                           test_data$dfs_status) ~ risk)$concordance
-          
-        }})
-
-summary_dfs <- tibble(
-  mean_c_index = mean(res_dfs,
-                      na.rm = TRUE),
-  sd_c_index = sd(res_dfs,
-                  na.rm = TRUE),
-  lower_95 = quantile(res_dfs, 0.025,
-                      na.rm = TRUE),
-  upper_95 = quantile(res_dfs, 0.975,
-                      na.rm = TRUE)) |> 
-  mutate(model = "Cox",
-         features = "all",
+predictions_dfs <- map_dfr(results_dfs, "predictions") |> 
+  mutate(model = setting,
          outcome = "DFS",
-         setting = ifelse(regularization,
-                          case_when(alpha == 1 ~ "lasso",
-                                    alpha == 0.5 ~ "elastic-net",
-                                    TRUE ~ "ERROR"),
-                          ifelse(prevalence_filter,
-                                 "prevalence_filter",
-                                 "classic"))) |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, setting))
+         features = "all")
 
-summary_dfs
+predictions_dfs
 
-write_tsv(summary_dfs,
-          file = "../results/05_cox_models_results.tsv",
+write_tsv(predictions_dfs,
+          file = "../results/05_cox_predictions.tsv",
+          append = TRUE)
+
+metrics_dfs <- map_dfr(results_dfs, "metrics") |> 
+  mutate(model = setting,
+         outcome = "DFS",
+         features = "all")
+
+metrics_dfs
+
+write_tsv(metrics_dfs,
+          file = "../results/05_cox_results.tsv",
+          append = TRUE)
+
+
+coefficients_dfs <- map_dfr(results_dfs, "coefficients") |> 
+  mutate(model = setting,
+         outcome = "DFS",
+         features = "all")
+
+coefficients_dfs
+
+write_tsv(coefficients_dfs,
+          file = "../results/05_cox_coefs.tsv",
           append = TRUE)
 ```
 
@@ -662,60 +873,127 @@ write_tsv(summary_dfs,
 #| echo: true
 #| warning: false
 
-res_dfs_noNLP <- map_dbl(folds_dfs_noNLP,
-                  ~ {
-                    
-        test_idx  <- .x
-        train_idx <- setdiff(seq_len(nrow(data_dfs_noNLP)), 
-                             test_idx)
+results_dfs_noNLP <- imap(
+  folds_dfs_noNLP,
+  ~ {
+    fold_idx <- .x
+    fold_num <- .y
+    
+    # Split train / test
+    train_idx <- setdiff(seq_len(nrow(data_dfs_noNLP)), 
+                         fold_idx)
+    train_data <- data_dfs_noNLP[train_idx, ]
+    test_data  <- data_dfs_noNLP[fold_idx, ]
+    
+    # Fit model
+    fit <- run_cox_workflow(train_data,
+                            "years_to_dfs_event",
+                            "dfs_status")
+    
+    if (is.na(fit)[1]) return(NULL)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred
+    
+    predictions <- tibble(
+      fold = fold_num,
+      id = test_data$patient_id,
+      dfs_status = test_data$dfs_status,
+      years_to_dfs_event = test_data$years_to_dfs_event,
+      risk = risk
+    )
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_dfs_event, 
+           test_data$dfs_status) ~ risk
+    )$concordance
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_dfs_event <= t & test_data$dfs_status == 1 ~ 1,
+        test_data$years_to_dfs_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(response = status_t[keep],
+              predictor = risk[keep],
+              quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    auc_12_months <- compute_auc(1)
+    auc_18_months <- compute_auc(1.5)
+    auc_24_months <- compute_auc(2)
+    auc_36_months <- compute_auc(3)
+    
+    metrics <- tibble(
+      fold = fold_num,
+      c_index = c_index,
+      auc_12_months = auc_12_months,
+      auc_18_months = auc_18_months,
+      auc_24_months = auc_24_months,
+      auc_36_months = auc_36_months
+    )
+    
+    # Store coefficients
+    coefs <- summary(fit)$coefficients
+    coefs <- tibble(
+      fold = fold_num,
+      feature = rownames(coefs),
+      beta = coefs[, "coef"],
+      p_value = coefs[, "Pr(>|z|)"]
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      coefficients = coefs
+    )
+  }
+)
 
-        train_data <- data_dfs_noNLP[train_idx, ]
-        test_data  <- data_dfs_noNLP[test_idx, ]
-
-        fit <- run_cox_workflow(train_data,
-                                "years_to_dfs_event",
-                                "dfs_status")
-
-        if (is.na(fit)[1]){
-          NA
-        } else {
-          pred <- predict(fit, 
-                          newdata = test_data)
-          
-          risk <- -pred
-          
-          concordance(Surv(test_data$years_to_dfs_event,
-                           test_data$dfs_status) ~ risk)$concordance
-          
-        }})
-
-summary_dfs_noNLP <- tibble(
-  mean_c_index = mean(res_dfs_noNLP,
-                      na.rm = TRUE),
-  sd_c_index = sd(res_dfs_noNLP,
-                  na.rm = TRUE),
-  lower_95 = quantile(res_dfs_noNLP, 0.025,
-                      na.rm = TRUE),
-  upper_95 = quantile(res_dfs_noNLP, 0.975,
-                      na.rm = TRUE)) |> 
-  mutate(model = "Cox",
-         features = "noNLP",
+predictions_dfs_noNLP <- map_dfr(results_dfs_noNLP, "predictions") |> 
+  mutate(model = setting,
          outcome = "DFS",
-         setting = ifelse(regularization,
-                          case_when(alpha == 1 ~ "lasso",
-                                    alpha == 0.5 ~ "elastic-net",
-                                    TRUE ~ "ERROR"),
-                          ifelse(prevalence_filter,
-                                 "prevalence_filter",
-                                 "classic"))) |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, setting))
+         features = "noNLP")
 
-summary_dfs_noNLP
+predictions_dfs_noNLP
 
-write_tsv(summary_dfs_noNLP,
-          file = "../results/05_cox_models_results.tsv",
+write_tsv(predictions_dfs_noNLP,
+          file = "../results/05_cox_predictions.tsv",
+          append = TRUE)
+
+metrics_dfs_noNLP <- map_dfr(results_dfs_noNLP, "metrics") |> 
+  mutate(model = setting,
+         outcome = "DFS",
+         features = "noNLP")
+
+metrics_dfs_noNLP
+
+write_tsv(metrics_dfs_noNLP,
+          file = "../results/05_cox_results.tsv",
+          append = TRUE)
+
+
+coefficients_dfs_noNLP <- map_dfr(results_dfs_noNLP, "coefficients") |> 
+  mutate(model = setting,
+         outcome = "DFS",
+         features = "noNLP")
+
+coefficients_dfs_noNLP
+
+write_tsv(coefficients_dfs_noNLP,
+          file = "../results/05_cox_coefs.tsv",
           append = TRUE)
 ```
 
@@ -726,60 +1004,127 @@ write_tsv(summary_dfs_noNLP,
 #| echo: true
 #| warning: false
 
-res_dfs_nogenomic <- map_dbl(folds_dfs_nogenomic,
-                  ~ {
-                    
-        test_idx  <- .x
-        train_idx <- setdiff(seq_len(nrow(data_dfs_nogenomic)), 
-                             test_idx)
+results_dfs_nogenomic <- imap(
+  folds_dfs_nogenomic,
+  ~ {
+    fold_idx <- .x
+    fold_num <- .y
+    
+    # Split train / test
+    train_idx <- setdiff(seq_len(nrow(data_dfs_nogenomic)), 
+                         fold_idx)
+    train_data <- data_dfs_nogenomic[train_idx, ]
+    test_data  <- data_dfs_nogenomic[fold_idx, ]
+    
+    # Fit model
+    fit <- run_cox_workflow(train_data,
+                            "years_to_dfs_event",
+                            "dfs_status")
+    
+    if (is.na(fit)[1]) return(NULL)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred
+    
+    predictions <- tibble(
+      fold = fold_num,
+      id = test_data$patient_id,
+      dfs_status = test_data$dfs_status,
+      years_to_dfs_event = test_data$years_to_dfs_event,
+      risk = risk
+    )
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_dfs_event, 
+           test_data$dfs_status) ~ risk
+    )$concordance
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_dfs_event <= t & test_data$dfs_status == 1 ~ 1,
+        test_data$years_to_dfs_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(response = status_t[keep],
+              predictor = risk[keep],
+              quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    auc_12_months <- compute_auc(1)
+    auc_18_months <- compute_auc(1.5)
+    auc_24_months <- compute_auc(2)
+    auc_36_months <- compute_auc(3)
+    
+    metrics <- tibble(
+      fold = fold_num,
+      c_index = c_index,
+      auc_12_months = auc_12_months,
+      auc_18_months = auc_18_months,
+      auc_24_months = auc_24_months,
+      auc_36_months = auc_36_months
+    )
+    
+    # Store coefficients
+    coefs <- summary(fit)$coefficients
+    coefs <- tibble(
+      fold = fold_num,
+      feature = rownames(coefs),
+      beta = coefs[, "coef"],
+      p_value = coefs[, "Pr(>|z|)"]
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      coefficients = coefs
+    )
+  }
+)
 
-        train_data <- data_dfs_nogenomic[train_idx, ]
-        test_data  <- data_dfs_nogenomic[test_idx, ]
-
-        fit <- run_cox_workflow(train_data,
-                                "years_to_dfs_event",
-                                "dfs_status")
-
-        if (is.na(fit)[1]){
-          NA
-        } else {
-          pred <- predict(fit, 
-                          newdata = test_data)
-          
-          risk <- -pred
-          
-          concordance(Surv(test_data$years_to_dfs_event,
-                           test_data$dfs_status) ~ risk)$concordance
-          
-        }})
-
-summary_dfs_nogenomic <- tibble(
-  mean_c_index = mean(res_dfs_nogenomic,
-                      na.rm = TRUE),
-  sd_c_index = sd(res_dfs_nogenomic,
-                  na.rm = TRUE),
-  lower_95 = quantile(res_dfs_nogenomic, 0.025,
-                      na.rm = TRUE),
-  upper_95 = quantile(res_dfs_nogenomic, 0.975,
-                      na.rm = TRUE)) |> 
-  mutate(model = "Cox",
-         features = "nogenomic",
+predictions_dfs_nogenomic <- map_dfr(results_dfs_nogenomic, "predictions") |> 
+  mutate(model = setting,
          outcome = "DFS",
-         setting = ifelse(regularization,
-                          case_when(alpha == 1 ~ "lasso",
-                                    alpha == 0.5 ~ "elastic-net",
-                                    TRUE ~ "ERROR"),
-                          ifelse(prevalence_filter,
-                                 "prevalence_filter",
-                                 "classic"))) |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, setting))
+         features = "nogenomic")
 
-summary_dfs_nogenomic
+predictions_dfs_nogenomic
 
-write_tsv(summary_dfs_nogenomic,
-          file = "../results/05_cox_models_results.tsv",
+write_tsv(predictions_dfs_nogenomic,
+          file = "../results/05_cox_predictions.tsv",
+          append = TRUE)
+
+metrics_dfs_nogenomic <- map_dfr(results_dfs_nogenomic, "metrics") |> 
+  mutate(model = setting,
+         outcome = "DFS",
+         features = "nogenomic")
+
+metrics_dfs_nogenomic
+
+write_tsv(metrics_dfs_nogenomic,
+          file = "../results/05_cox_results.tsv",
+          append = TRUE)
+
+
+coefficients_dfs_nogenomic <- map_dfr(results_dfs_nogenomic, "coefficients") |> 
+  mutate(model = setting,
+         outcome = "DFS",
+         features = "nogenomic")
+
+coefficients_dfs_nogenomic
+
+write_tsv(coefficients_dfs_nogenomic,
+          file = "../results/05_cox_coefs.tsv",
           append = TRUE)
 ```
 
@@ -790,59 +1135,126 @@ write_tsv(summary_dfs_nogenomic,
 #| echo: true
 #| warning: false
 
-res_dfs_noNLPgenomic <- map_dbl(folds_dfs_noNLPgenomic,
-                  ~ {
-                    
-        test_idx  <- .x
-        train_idx <- setdiff(seq_len(nrow(data_dfs_noNLPgenomic)), 
-                             test_idx)
+results_dfs_noNLPgenomic <- imap(
+  folds_dfs_noNLPgenomic,
+  ~ {
+    fold_idx <- .x
+    fold_num <- .y
+    
+    # Split train / test
+    train_idx <- setdiff(seq_len(nrow(data_dfs_noNLPgenomic)), 
+                         fold_idx)
+    train_data <- data_dfs_noNLPgenomic[train_idx, ]
+    test_data  <- data_dfs_noNLPgenomic[fold_idx, ]
+    
+    # Fit model
+    fit <- run_cox_workflow(train_data,
+                            "years_to_dfs_event",
+                            "dfs_status")
+    
+    if (is.na(fit)[1]) return(NULL)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred
+    
+    predictions <- tibble(
+      fold = fold_num,
+      id = test_data$patient_id,
+      dfs_status = test_data$dfs_status,
+      years_to_dfs_event = test_data$years_to_dfs_event,
+      risk = risk
+    )
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_dfs_event, 
+           test_data$dfs_status) ~ risk
+    )$concordance
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_dfs_event <= t & test_data$dfs_status == 1 ~ 1,
+        test_data$years_to_dfs_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(response = status_t[keep],
+              predictor = risk[keep],
+              quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    auc_12_months <- compute_auc(1)
+    auc_18_months <- compute_auc(1.5)
+    auc_24_months <- compute_auc(2)
+    auc_36_months <- compute_auc(3)
+    
+    metrics <- tibble(
+      fold = fold_num,
+      c_index = c_index,
+      auc_12_months = auc_12_months,
+      auc_18_months = auc_18_months,
+      auc_24_months = auc_24_months,
+      auc_36_months = auc_36_months
+    )
+    
+    # Store coefficients
+    coefs <- summary(fit)$coefficients
+    coefs <- tibble(
+      fold = fold_num,
+      feature = rownames(coefs),
+      beta = coefs[, "coef"],
+      p_value = coefs[, "Pr(>|z|)"]
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      coefficients = coefs
+    )
+  }
+)
 
-        train_data <- data_dfs_noNLPgenomic[train_idx, ]
-        test_data  <- data_dfs_noNLPgenomic[test_idx, ]
-
-        fit <- run_cox_workflow(train_data,
-                                "years_to_dfs_event",
-                                "dfs_status")
-
-        if (is.na(fit)[1]){
-          NA
-        } else {
-          pred <- predict(fit, 
-                          newdata = test_data)
-          
-          risk <- -pred
-          
-          concordance(Surv(test_data$years_to_dfs_event,
-                           test_data$dfs_status) ~ risk)$concordance
-          
-        }})
-
-summary_dfs_noNLPgenomic <- tibble(
-  mean_c_index = mean(res_dfs_noNLPgenomic,
-                      na.rm = TRUE),
-  sd_c_index = sd(res_dfs_noNLPgenomic,
-                  na.rm = TRUE),
-  lower_95 = quantile(res_dfs_noNLPgenomic, 0.025,
-                      na.rm = TRUE),
-  upper_95 = quantile(res_dfs_noNLPgenomic, 0.975,
-                      na.rm = TRUE)) |> 
-  mutate(model = "Cox",
-         features = "noNLPgenomic",
+predictions_dfs_noNLPgenomic <- map_dfr(results_dfs_noNLPgenomic, "predictions") |> 
+  mutate(model = setting,
          outcome = "DFS",
-         setting = ifelse(regularization,
-                          case_when(alpha == 1 ~ "lasso",
-                                    alpha == 0.5 ~ "elastic-net",
-                                    TRUE ~ "ERROR"),
-                          ifelse(prevalence_filter,
-                                 "prevalence_filter",
-                                 "classic"))) |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, setting))
+         features = "noNLPgenomic")
 
-summary_dfs_noNLPgenomic
+predictions_dfs_noNLPgenomic
 
-write_tsv(summary_dfs_noNLPgenomic,
-          file = "../results/05_cox_models_results.tsv",
+write_tsv(predictions_dfs_noNLPgenomic,
+          file = "../results/05_cox_predictions.tsv",
+          append = TRUE)
+
+metrics_dfs_noNLPgenomic <- map_dfr(results_dfs_noNLPgenomic, "metrics") |> 
+  mutate(model = setting,
+         outcome = "DFS",
+         features = "noNLPgenomic")
+
+metrics_dfs_noNLPgenomic
+
+write_tsv(metrics_dfs_noNLPgenomic,
+          file = "../results/05_cox_results.tsv",
+          append = TRUE)
+
+
+coefficients_dfs_noNLPgenomic <- map_dfr(results_dfs_noNLPgenomic, "coefficients") |> 
+  mutate(model = setting,
+         outcome = "DFS",
+         features = "noNLPgenomic")
+
+coefficients_dfs_noNLPgenomic
+
+write_tsv(coefficients_dfs_noNLPgenomic,
+          file = "../results/05_cox_coefs.tsv",
           append = TRUE)
 ```
