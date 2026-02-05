@@ -16,6 +16,7 @@ library("tidyverse")
 library("randomForestSRC")
 library("caret")
 library("survival")
+library("pROC")
 ```
 
 ```{r}
@@ -51,9 +52,9 @@ data_dfs_noNLPgenomic <- read_tsv(file = "../data/03_data_train_dfs_noNLPgenomic
 
 trees <- 1000
 
-rule <- "logrankscore" # logrank (default), bs.gradient, or logrankscore
+rule <- "logrank" # logrank (default), bs.gradient, or logrankscore
 
-tree_grid <- c(1, seq(50, trees, by = 50))
+#tree_grid <- c(1, seq(50, trees, by = 50))
 ```
 
 # Set up cross-validation
@@ -106,91 +107,132 @@ folds_dfs_noNLPgenomic <- createFolds(data_dfs_noNLPgenomic$dfs_status,
 #| echo: true
 #| warning: false
 
-rsf_res_os <- map_dfr(tree_grid,
-                      function(trees) {
-
-    fold_c <- map_dbl(folds_os,
-                      ~ {
-                        
-        data <- data_os |> 
-          select(- c(patient_id,
-                     sample_id))
-                        
-        test_idx  <- .x
-        train_idx <- setdiff(seq_len(nrow(data)), 
-                             test_idx)
-
-        train_data <- data[train_idx, ]
-        test_data  <- data[test_idx, ]
-
-        fit <- rfsrc(Surv(years_to_os_event, 
-                          os_status) ~ .,
-                     data = train_data,
-                     ntree = trees,
-                     splitrule = rule)
-
-        pred <- predict(fit, 
-                        newdata = test_data)
-        
-        risk <- -pred$predicted
-
-        concordance(Surv(test_data$years_to_os_event, 
-                         test_data$os_status) ~ risk)$concordance
-      }
+results_os <- imap(
+  folds_os,
+  ~ {
+    fold_idx <- .x
+    fold_num <- .y
+    
+    data <- data_os |> 
+      select(-c(patient_id, sample_id))
+    
+    # Split train / test
+    train_idx <- setdiff(seq_len(nrow(data)),
+                         fold_idx)
+    train_data <- data[train_idx, ]
+    test_data  <- data[fold_idx, ]
+    
+    # Fit RSF
+    fit <- rfsrc(Surv(years_to_os_event, 
+                      os_status) ~ ., 
+                 data = train_data,
+                 ntree = trees,
+                 splitrule = rule,
+                 importance = TRUE)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred$predicted
+    
+    predictions <- tibble(
+      fold = fold_num,
+      id = test_data$patient_id,
+      os_status = test_data$os_status,
+      years_to_os_event = test_data$years_to_os_event,
+      risk = risk
     )
 
-    tibble(trees = trees,
-           c_fold_1 = fold_c[1],
-           c_fold_2 = fold_c[2],
-           c_fold_3 = fold_c[3],
-           c_fold_4 = fold_c[4],
-           c_fold_5 = fold_c[5])
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_os_event, 
+           test_data$os_status) ~ risk
+    )$concordance
+
+
+  # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_os_event <= t & test_data$os_status == 1 ~ 1,
+        test_data$years_to_os_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(response = status_t[keep],
+              predictor = risk[keep],
+              quiet = TRUE)$auc
+        )
+      }
+    }
+
+    auc_12_months <- compute_auc(1)
+    auc_18_months <- compute_auc(1.5)
+    auc_24_months <- compute_auc(2)
+    auc_36_months <- compute_auc(3)
+    
+    metrics <- tibble(
+      fold = fold_num,
+      c_index = c_index,
+      auc_12_months = auc_12_months,
+      auc_18_months = auc_18_months,
+      auc_24_months = auc_24_months,
+      auc_36_months = auc_36_months
+    )
+    
+    # Store variable importance
+    imp <- fit$importance
+    
+    importance <- tibble(
+      fold = fold_num,
+      feature = names(imp),
+      importance = as.numeric(imp)
+    )
+
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      importance = importance
+    )
   }
 )
 
-summary_os <- rsf_res_os |> 
-  pivot_longer(cols = -trees,
-               names_to = "fold",
-               values_to = "c_index") |> 
-  group_by(trees) |> 
-  summarise(mean_c_index = mean(c_index),
-            sd_c_index = sd(c_index),
-            lower_95 = quantile(c_index, 0.025),
-            upper_95 = quantile(c_index, 0.975),
-            .groups = "drop") 
-
-summary_os |> 
-  ggplot(mapping = aes(x = trees, 
-                       y = mean_c_index)) +
-  geom_line() +
-  geom_ribbon(aes(ymin = lower_95, 
-                  ymax = upper_95),
-              alpha = 0.2) +
-  labs(
-    x = "Number of trees",
-    y = "C-index (95% CI)",
-    title = "Random survival forest model (OS)",
-    subtitle = "Feature sets included: all") +
-  theme_minimal()
-
-ggsave(paste0("../results/07_tree_plot_OS_",
-              rule,
-              ".png"))
-
-final_os <- summary_os |> 
-  filter(trees == max(trees)) |> 
+predictions_os <- map_dfr(results_os, "predictions") |> 
   mutate(model = "RSF",
-         features = "all",
          outcome = "OS",
-         rule = rule) |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, rule))
+         features = "all")
 
-final_os
+predictions_os
 
-write_tsv(final_os,
-          file = "../results/07_rsf_models_results.tsv",
+write_tsv(predictions_os,
+          file = "../results/07_rsf_predictions.tsv",
+          append = TRUE)
+
+metrics_os <- map_dfr(results_os, "metrics") |> 
+  mutate(model = "RSF",
+         outcome = "OS",
+         features = "all")
+
+metrics_os
+
+write_tsv(metrics_os,
+          file = "../results/07_rsf_results.tsv",
+          append = TRUE)
+
+
+importance_os <- map_dfr(results_os, "importance") |> 
+  mutate(model = "RSF",
+         outcome = "OS",
+         features = "all")
+
+importance_os
+
+write_tsv(importance_os,
+          file = "../results/07_rsf_vimp.tsv",
           append = TRUE)
 ```
 
@@ -201,91 +243,132 @@ write_tsv(final_os,
 #| echo: true
 #| warning: false
 
-rsf_res_os_noNLP <- map_dfr(tree_grid,
-                            function(trees) {
-
-    fold_c <- map_dbl(folds_os_noNLP,
-                      ~ {
-                        
-        data <- data_os_noNLP |> 
-          select(- c(patient_id,
-                     sample_id))
-                        
-        test_idx  <- .x
-        train_idx <- setdiff(seq_len(nrow(data)), 
-                             test_idx)
-
-        train_data <- data[train_idx, ]
-        test_data  <- data[test_idx, ]
-
-        fit <- rfsrc(Surv(years_to_os_event, 
-                          os_status) ~ .,
-                     data = train_data,
-                     ntree = trees,
-                     splitrule = rule)
-
-        pred <- predict(fit, 
-                        newdata = test_data)
-        
-        risk <- -pred$predicted
-
-        concordance(Surv(test_data$years_to_os_event, 
-                         test_data$os_status) ~ risk)$concordance
-      }
+results_os_noNLP <- imap(
+  folds_os_noNLP,
+  ~ {
+    fold_idx <- .x
+    fold_num <- .y
+    
+    data <- data_os_noNLP |> 
+      select(-c(patient_id, sample_id))
+    
+    # Split train / test
+    train_idx <- setdiff(seq_len(nrow(data)),
+                         fold_idx)
+    train_data <- data[train_idx, ]
+    test_data  <- data[fold_idx, ]
+    
+    # Fit RSF
+    fit <- rfsrc(Surv(years_to_os_event, 
+                      os_status) ~ ., 
+                 data = train_data,
+                 ntree = trees,
+                 splitrule = rule,
+                 importance = TRUE)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred$predicted
+    
+    predictions <- tibble(
+      fold = fold_num,
+      id = test_data$patient_id,
+      os_status = test_data$os_status,
+      years_to_os_event = test_data$years_to_os_event,
+      risk = risk
     )
-
-    tibble(trees = trees,
-           c_fold_1 = fold_c[1],
-           c_fold_2 = fold_c[2],
-           c_fold_3 = fold_c[3],
-           c_fold_4 = fold_c[4],
-           c_fold_5 = fold_c[5])
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_os_event, 
+           test_data$os_status) ~ risk
+    )$concordance
+    
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_os_event <= t & test_data$os_status == 1 ~ 1,
+        test_data$years_to_os_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(response = status_t[keep],
+              predictor = risk[keep],
+              quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    auc_12_months <- compute_auc(1)
+    auc_18_months <- compute_auc(1.5)
+    auc_24_months <- compute_auc(2)
+    auc_36_months <- compute_auc(3)
+    
+    metrics <- tibble(
+      fold = fold_num,
+      c_index = c_index,
+      auc_12_months = auc_12_months,
+      auc_18_months = auc_18_months,
+      auc_24_months = auc_24_months,
+      auc_36_months = auc_36_months
+    )
+    
+    # Store variable importance
+    imp <- fit$importance
+    
+    importance <- tibble(
+      fold = fold_num,
+      feature = names(imp),
+      importance = as.numeric(imp)
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      importance = importance
+    )
   }
 )
 
-summary_os_noNLP  <- rsf_res_os_noNLP  |> 
-  pivot_longer(cols = -trees,
-               names_to = "fold",
-               values_to = "c_index") |> 
-  group_by(trees) |> 
-  summarise(mean_c_index = mean(c_index),
-            sd_c_index = sd(c_index),
-            lower_95 = quantile(c_index, 0.025),
-            upper_95 = quantile(c_index, 0.975),
-            .groups = "drop") 
-
-summary_os_noNLP  |> 
-  ggplot(mapping = aes(x = trees, 
-                       y = mean_c_index)) +
-  geom_line() +
-  geom_ribbon(aes(ymin = lower_95, 
-                  ymax = upper_95),
-              alpha = 0.2) +
-  labs(
-    x = "Number of trees",
-    y = "C-index (95% CI)",
-    title = "Random survival forest model (OS)",
-    subtitle = "Feature sets included: no NLP") +
-  theme_minimal()
-
-ggsave(paste0("../results/07_tree_plot_OS_noNLP_",
-              rule,
-              ".png"))
-
-final_os_noNLP  <- summary_os_noNLP  |> 
-  filter(trees == max(trees)) |> 
+predictions_os_noNLP <- map_dfr(results_os_noNLP, "predictions") |> 
   mutate(model = "RSF",
-         features = "noNLP",
          outcome = "OS",
-         rule = rule) |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, rule))
+         features = "noNLP")
 
-final_os_noNLP 
+predictions_os_noNLP
 
-write_tsv(final_os_noNLP,
-          file = "../results/07_rsf_models_results.tsv",
+write_tsv(predictions_os_noNLP,
+          file = "../results/07_rsf_predictions.tsv",
+          append = TRUE)
+
+metrics_os_noNLP <- map_dfr(results_os_noNLP, "metrics") |> 
+  mutate(model = "RSF",
+         outcome = "OS",
+         features = "noNLP")
+
+metrics_os_noNLP
+
+write_tsv(metrics_os_noNLP,
+          file = "../results/07_rsf_results.tsv",
+          append = TRUE)
+
+
+importance_os_noNLP <- map_dfr(results_os_noNLP, "importance") |> 
+  mutate(model = "RSF",
+         outcome = "OS",
+         features = "noNLP")
+
+importance_os_noNLP
+
+write_tsv(importance_os_noNLP,
+          file = "../results/07_rsf_vimp.tsv",
           append = TRUE)
 ```
 
@@ -296,91 +379,132 @@ write_tsv(final_os_noNLP,
 #| echo: true
 #| warning: false
 
-rsf_res_os_nogenomic <- map_dfr(tree_grid,
-                                 function(trees) {
-
-    fold_c <- map_dbl(folds_os_nogenomic,
-                      ~ {
-                        
-        data <- data_os_nogenomic |> 
-          select(- c(patient_id,
-                     sample_id))
-                        
-        test_idx  <- .x
-        train_idx <- setdiff(seq_len(nrow(data)), 
-                             test_idx)
-
-        train_data <- data[train_idx, ]
-        test_data  <- data[test_idx, ]
-
-        fit <- rfsrc(Surv(years_to_os_event, 
-                          os_status) ~ .,
-                     data = train_data,
-                     ntree = trees,
-                     splitrule = rule)
-
-        pred <- predict(fit, 
-                        newdata = test_data)
-        
-        risk <- -pred$predicted
-
-        concordance(Surv(test_data$years_to_os_event, 
-                         test_data$os_status) ~ risk)$concordance
-      }
+results_os_nogenomic <- imap(
+  folds_os_nogenomic,
+  ~ {
+    fold_idx <- .x
+    fold_num <- .y
+    
+    data <- data_os_nogenomic |> 
+      select(-c(patient_id, sample_id))
+    
+    # Split train / test
+    train_idx <- setdiff(seq_len(nrow(data)),
+                         fold_idx)
+    train_data <- data[train_idx, ]
+    test_data  <- data[fold_idx, ]
+    
+    # Fit RSF
+    fit <- rfsrc(Surv(years_to_os_event, 
+                      os_status) ~ ., 
+                 data = train_data,
+                 ntree = trees,
+                 splitrule = rule,
+                 importance = TRUE)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred$predicted
+    
+    predictions <- tibble(
+      fold = fold_num,
+      id = test_data$patient_id,
+      os_status = test_data$os_status,
+      years_to_os_event = test_data$years_to_os_event,
+      risk = risk
     )
-
-    tibble(trees = trees,
-           c_fold_1 = fold_c[1],
-           c_fold_2 = fold_c[2],
-           c_fold_3 = fold_c[3],
-           c_fold_4 = fold_c[4],
-           c_fold_5 = fold_c[5])
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_os_event, 
+           test_data$os_status) ~ risk
+    )$concordance
+    
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_os_event <= t & test_data$os_status == 1 ~ 1,
+        test_data$years_to_os_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(response = status_t[keep],
+              predictor = risk[keep],
+              quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    auc_12_months <- compute_auc(1)
+    auc_18_months <- compute_auc(1.5)
+    auc_24_months <- compute_auc(2)
+    auc_36_months <- compute_auc(3)
+    
+    metrics <- tibble(
+      fold = fold_num,
+      c_index = c_index,
+      auc_12_months = auc_12_months,
+      auc_18_months = auc_18_months,
+      auc_24_months = auc_24_months,
+      auc_36_months = auc_36_months
+    )
+    
+    # Store variable importance
+    imp <- fit$importance
+    
+    importance <- tibble(
+      fold = fold_num,
+      feature = names(imp),
+      importance = as.numeric(imp)
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      importance = importance
+    )
   }
 )
 
-summary_os_nogenomic  <- rsf_res_os_nogenomic  |> 
-  pivot_longer(cols = -trees,
-               names_to = "fold",
-               values_to = "c_index") |> 
-  group_by(trees) |> 
-  summarise(mean_c_index = mean(c_index),
-            sd_c_index = sd(c_index),
-            lower_95 = quantile(c_index, 0.025),
-            upper_95 = quantile(c_index, 0.975),
-            .groups = "drop") 
-
-summary_os_nogenomic  |> 
-  ggplot(mapping = aes(x = trees, 
-                       y = mean_c_index)) +
-  geom_line() +
-  geom_ribbon(aes(ymin = lower_95, 
-                  ymax = upper_95),
-              alpha = 0.2) +
-  labs(
-    x = "Number of trees",
-    y = "C-index (95% CI)",
-    title = "Random survival forest model (OS)",
-    subtitle = "Feature sets included: no genomic") +
-  theme_minimal()
-
-ggsave(paste0("../results/07_tree_plot_OS_nogenomic_",
-              rule,
-              ".png"))
-
-final_os_nogenomic  <- summary_os_nogenomic  |> 
-  filter(trees == max(trees)) |> 
+predictions_os_nogenomic <- map_dfr(results_os_nogenomic, "predictions") |> 
   mutate(model = "RSF",
-         features = "nogenomic",
          outcome = "OS",
-         rule = rule) |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, rule))
+         features = "nogenomic")
 
-final_os_nogenomic 
+predictions_os_nogenomic
 
-write_tsv(final_os_nogenomic,
-          file = "../results/07_rsf_models_results.tsv",
+write_tsv(predictions_os_nogenomic,
+          file = "../results/07_rsf_predictions.tsv",
+          append = TRUE)
+
+metrics_os_nogenomic <- map_dfr(results_os_nogenomic, "metrics") |> 
+  mutate(model = "RSF",
+         outcome = "OS",
+         features = "nogenomic")
+
+metrics_os_nogenomic
+
+write_tsv(metrics_os_nogenomic,
+          file = "../results/07_rsf_results.tsv",
+          append = TRUE)
+
+
+importance_os_nogenomic <- map_dfr(results_os_nogenomic, "importance") |> 
+  mutate(model = "RSF",
+         outcome = "OS",
+         features = "nogenomic")
+
+importance_os_nogenomic
+
+write_tsv(importance_os_nogenomic,
+          file = "../results/07_rsf_vimp.tsv",
           append = TRUE)
 ```
 
@@ -391,93 +515,135 @@ write_tsv(final_os_nogenomic,
 #| echo: true
 #| warning: false
 
-rsf_res_os_noNLPgenomic <- map_dfr(tree_grid,
-                                    function(trees) {
-
-    fold_c <- map_dbl(folds_os_noNLPgenomic,
-                      ~ {
-                        
-        data <- data_os_noNLPgenomic |> 
-          select(- c(patient_id,
-                     sample_id))
-                        
-        test_idx  <- .x
-        train_idx <- setdiff(seq_len(nrow(data)), 
-                             test_idx)
-
-        train_data <- data[train_idx, ]
-        test_data  <- data[test_idx, ]
-
-        fit <- rfsrc(Surv(years_to_os_event, 
-                          os_status) ~ .,
-                     data = train_data,
-                     ntree = trees,
-                     splitrule = rule)
-
-        pred <- predict(fit, 
-                        newdata = test_data)
-        
-        risk <- -pred$predicted
-
-        concordance(Surv(test_data$years_to_os_event, 
-                         test_data$os_status) ~ risk)$concordance
-      }
+results_os_noNLPgenomic <- imap(
+  folds_os_noNLPgenomic,
+  ~ {
+    fold_idx <- .x
+    fold_num <- .y
+    
+    data <- data_os_noNLPgenomic |> 
+      select(-c(patient_id, sample_id))
+    
+    # Split train / test
+    train_idx <- setdiff(seq_len(nrow(data)),
+                         fold_idx)
+    train_data <- data[train_idx, ]
+    test_data  <- data[fold_idx, ]
+    
+    # Fit RSF
+    fit <- rfsrc(Surv(years_to_os_event, 
+                      os_status) ~ ., 
+                 data = train_data,
+                 ntree = trees,
+                 splitrule = rule,
+                 importance = TRUE)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred$predicted
+    
+    predictions <- tibble(
+      fold = fold_num,
+      id = test_data$patient_id,
+      os_status = test_data$os_status,
+      years_to_os_event = test_data$years_to_os_event,
+      risk = risk
     )
-
-    tibble(trees = trees,
-           c_fold_1 = fold_c[1],
-           c_fold_2 = fold_c[2],
-           c_fold_3 = fold_c[3],
-           c_fold_4 = fold_c[4],
-           c_fold_5 = fold_c[5])
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_os_event, 
+           test_data$os_status) ~ risk
+    )$concordance
+    
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_os_event <= t & test_data$os_status == 1 ~ 1,
+        test_data$years_to_os_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(response = status_t[keep],
+              predictor = risk[keep],
+              quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    auc_12_months <- compute_auc(1)
+    auc_18_months <- compute_auc(1.5)
+    auc_24_months <- compute_auc(2)
+    auc_36_months <- compute_auc(3)
+    
+    metrics <- tibble(
+      fold = fold_num,
+      c_index = c_index,
+      auc_12_months = auc_12_months,
+      auc_18_months = auc_18_months,
+      auc_24_months = auc_24_months,
+      auc_36_months = auc_36_months
+    )
+    
+    # Store variable importance
+    imp <- fit$importance
+    
+    importance <- tibble(
+      fold = fold_num,
+      feature = names(imp),
+      importance = as.numeric(imp)
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      importance = importance
+    )
   }
 )
 
-summary_os_noNLPgenomic  <- rsf_res_os_noNLPgenomic  |> 
-  pivot_longer(cols = -trees,
-               names_to = "fold",
-               values_to = "c_index") |> 
-  group_by(trees) |> 
-  summarise(mean_c_index = mean(c_index),
-            sd_c_index = sd(c_index),
-            lower_95 = quantile(c_index, 0.025),
-            upper_95 = quantile(c_index, 0.975),
-            .groups = "drop") 
-
-summary_os_noNLPgenomic  |> 
-  ggplot(mapping = aes(x = trees, 
-                       y = mean_c_index)) +
-  geom_line() +
-  geom_ribbon(aes(ymin = lower_95, 
-                  ymax = upper_95),
-              alpha = 0.2) +
-  labs(
-    x = "Number of trees",
-    y = "C-index (95% CI)",
-    title = "Random survival forest model (OS)",
-    subtitle = "Feature sets included: no NLP or genomic") +
-  theme_minimal()
-
-ggsave(paste0("../results/07_tree_plot_OS_noNLPgenomic_",
-              rule,
-              ".png"))
-
-final_os_noNLPgenomic  <- summary_os_noNLPgenomic  |> 
-  filter(trees == max(trees)) |> 
+predictions_os_noNLPgenomic <- map_dfr(results_os_noNLPgenomic, "predictions") |> 
   mutate(model = "RSF",
-         features = "noNLPgenomic",
          outcome = "OS",
-         rule = rule) |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, rule))
+         features = "noNLPgenomic")
 
-final_os_noNLPgenomic 
+predictions_os_noNLPgenomic
 
-write_tsv(final_os_noNLPgenomic,
-          file = "../results/07_rsf_models_results.tsv",
+write_tsv(predictions_os_noNLPgenomic,
+          file = "../results/07_rsf_predictions.tsv",
+          append = TRUE)
+
+metrics_os_noNLPgenomic <- map_dfr(results_os_noNLPgenomic, "metrics") |> 
+  mutate(model = "RSF",
+         outcome = "OS",
+         features = "noNLPgenomic")
+
+metrics_os_noNLPgenomic
+
+write_tsv(metrics_os_noNLPgenomic,
+          file = "../results/07_rsf_results.tsv",
+          append = TRUE)
+
+
+importance_os_noNLPgenomic <- map_dfr(results_os_noNLPgenomic, "importance") |> 
+  mutate(model = "RSF",
+         outcome = "OS",
+         features = "noNLPgenomic")
+
+importance_os_noNLPgenomic
+
+write_tsv(importance_os_noNLPgenomic,
+          file = "../results/07_rsf_vimp.tsv",
           append = TRUE)
 ```
+
 # Predicting DFS
 
 ## All features
@@ -487,91 +653,132 @@ write_tsv(final_os_noNLPgenomic,
 #| echo: true
 #| warning: false
 
-rsf_res_dfs <- map_dfr(tree_grid,
-                       function(trees) {
-
-    fold_c <- map_dbl(folds_dfs,
-                      ~ {
-                        
-        data <- data_dfs |> 
-          select(- c(patient_id,
-                     sample_id))
-                        
-        test_idx  <- .x
-        train_idx <- setdiff(seq_len(nrow(data)), 
-                             test_idx)
-
-        train_data <- data[train_idx, ]
-        test_data  <- data[test_idx, ]
-
-        fit <- rfsrc(Surv(years_to_dfs_event, 
-                          dfs_status) ~ .,
-                     data = train_data,
-                     ntree = trees,
-                     splitrule = rule)
-
-        pred <- predict(fit, 
-                        newdata = test_data)
-        
-        risk <- -pred$predicted
-
-        concordance(Surv(test_data$years_to_dfs_event, 
-                         test_data$dfs_status) ~ risk)$concordance
-      }
+results_dfs <- imap(
+  folds_dfs,
+  ~ {
+    fold_idx <- .x
+    fold_num <- .y
+    
+    data <- data_dfs |> 
+      select(-c(patient_id, sample_id))
+    
+    # Split train / test
+    train_idx <- setdiff(seq_len(nrow(data)),
+                         fold_idx)
+    train_data <- data[train_idx, ]
+    test_data  <- data[fold_idx, ]
+    
+    # Fit RSF
+    fit <- rfsrc(Surv(years_to_dfs_event, 
+                      dfs_status) ~ ., 
+                 data = train_data,
+                 ntree = trees,
+                 splitrule = rule,
+                 importance = TRUE)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred$predicted
+    
+    predictions <- tibble(
+      fold = fold_num,
+      id = test_data$patient_id,
+      dfs_status = test_data$dfs_status,
+      years_to_dfs_event = test_data$years_to_dfs_event,
+      risk = risk
     )
-
-    tibble(trees = trees,
-           c_fold_1 = fold_c[1],
-           c_fold_2 = fold_c[2],
-           c_fold_3 = fold_c[3],
-           c_fold_4 = fold_c[4],
-           c_fold_5 = fold_c[5])
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_dfs_event, 
+           test_data$dfs_status) ~ risk
+    )$concordance
+    
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_dfs_event <= t & test_data$dfs_status == 1 ~ 1,
+        test_data$years_to_dfs_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(response = status_t[keep],
+              predictor = risk[keep],
+              quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    auc_12_months <- compute_auc(1)
+    auc_18_months <- compute_auc(1.5)
+    auc_24_months <- compute_auc(2)
+    auc_36_months <- compute_auc(3)
+    
+    metrics <- tibble(
+      fold = fold_num,
+      c_index = c_index,
+      auc_12_months = auc_12_months,
+      auc_18_months = auc_18_months,
+      auc_24_months = auc_24_months,
+      auc_36_months = auc_36_months
+    )
+    
+    # Store variable importance
+    imp <- fit$importance
+    
+    importance <- tibble(
+      fold = fold_num,
+      feature = names(imp),
+      importance = as.numeric(imp)
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      importance = importance
+    )
   }
 )
 
-summary_dfs <- rsf_res_dfs |> 
-  pivot_longer(cols = -trees,
-               names_to = "fold",
-               values_to = "c_index") |> 
-  group_by(trees) |> 
-  summarise(mean_c_index = mean(c_index),
-            sd_c_index = sd(c_index),
-            lower_95 = quantile(c_index, 0.025),
-            upper_95 = quantile(c_index, 0.975),
-            .groups = "drop") 
-
-summary_dfs |> 
-  ggplot(mapping = aes(x = trees, 
-                       y = mean_c_index)) +
-  geom_line() +
-  geom_ribbon(aes(ymin = lower_95, 
-                  ymax = upper_95),
-              alpha = 0.2) +
-  labs(
-    x = "Number of trees",
-    y = "C-index (95% CI)",
-    title = "Random survival forest model (DFS)",
-    subtitle = "Feature sets included: all") +
-  theme_minimal()
-
-ggsave(paste0("../results/07_tree_plot_DFS_",
-              rule,
-              ".png"))
-
-final_dfs <- summary_dfs |> 
-  filter(trees == max(trees)) |> 
+predictions_dfs <- map_dfr(results_dfs, "predictions") |> 
   mutate(model = "RSF",
-         features = "all",
          outcome = "DFS",
-         rule = rule) |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, rule))
+         features = "all")
 
-final_dfs
+predictions_dfs
 
-write_tsv(final_dfs,
-          file = "../results/07_rsf_models_results.tsv",
+write_tsv(predictions_dfs,
+          file = "../results/07_rsf_predictions.tsv",
+          append = TRUE)
+
+metrics_dfs <- map_dfr(results_dfs, "metrics") |> 
+  mutate(model = "RSF",
+         outcome = "DFS",
+         features = "all")
+
+metrics_dfs
+
+write_tsv(metrics_dfs,
+          file = "../results/07_rsf_results.tsv",
+          append = TRUE)
+
+
+importance_dfs <- map_dfr(results_dfs, "importance") |> 
+  mutate(model = "RSF",
+         outcome = "DFS",
+         features = "all")
+
+importance_dfs
+
+write_tsv(importance_dfs,
+          file = "../results/07_rsf_vimp.tsv",
           append = TRUE)
 ```
 
@@ -582,91 +789,132 @@ write_tsv(final_dfs,
 #| echo: true
 #| warning: false
 
-rsf_res_dfs_noNLP <- map_dfr(tree_grid,
-                             function(trees) {
-
-    fold_c <- map_dbl(folds_dfs_noNLP,
-                      ~ {
-                        
-        data <- data_dfs_noNLP |> 
-          select(- c(patient_id,
-                     sample_id))
-                        
-        test_idx  <- .x
-        train_idx <- setdiff(seq_len(nrow(data)), 
-                             test_idx)
-
-        train_data <- data[train_idx, ]
-        test_data  <- data[test_idx, ]
-
-        fit <- rfsrc(Surv(years_to_dfs_event, 
-                          dfs_status) ~ .,
-                     data = train_data,
-                     ntree = trees,
-                     splitrule = rule)
-
-        pred <- predict(fit, 
-                        newdata = test_data)
-        
-        risk <- -pred$predicted
-
-        concordance(Surv(test_data$years_to_dfs_event, 
-                         test_data$dfs_status) ~ risk)$concordance
-      }
+results_dfs_noNLP <- imap(
+  folds_dfs_noNLP,
+  ~ {
+    fold_idx <- .x
+    fold_num <- .y
+    
+    data <- data_dfs_noNLP |> 
+      select(-c(patient_id, sample_id))
+    
+    # Split train / test
+    train_idx <- setdiff(seq_len(nrow(data)),
+                         fold_idx)
+    train_data <- data[train_idx, ]
+    test_data  <- data[fold_idx, ]
+    
+    # Fit RSF
+    fit <- rfsrc(Surv(years_to_dfs_event, 
+                      dfs_status) ~ ., 
+                 data = train_data,
+                 ntree = trees,
+                 splitrule = rule,
+                 importance = TRUE)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred$predicted
+    
+    predictions <- tibble(
+      fold = fold_num,
+      id = test_data$patient_id,
+      dfs_status = test_data$dfs_status,
+      years_to_dfs_event = test_data$years_to_dfs_event,
+      risk = risk
     )
-
-    tibble(trees = trees,
-           c_fold_1 = fold_c[1],
-           c_fold_2 = fold_c[2],
-           c_fold_3 = fold_c[3],
-           c_fold_4 = fold_c[4],
-           c_fold_5 = fold_c[5])
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_dfs_event, 
+           test_data$dfs_status) ~ risk
+    )$concordance
+    
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_dfs_event <= t & test_data$dfs_status == 1 ~ 1,
+        test_data$years_to_dfs_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(response = status_t[keep],
+              predictor = risk[keep],
+              quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    auc_12_months <- compute_auc(1)
+    auc_18_months <- compute_auc(1.5)
+    auc_24_months <- compute_auc(2)
+    auc_36_months <- compute_auc(3)
+    
+    metrics <- tibble(
+      fold = fold_num,
+      c_index = c_index,
+      auc_12_months = auc_12_months,
+      auc_18_months = auc_18_months,
+      auc_24_months = auc_24_months,
+      auc_36_months = auc_36_months
+    )
+    
+    # Store variable importance
+    imp <- fit$importance
+    
+    importance <- tibble(
+      fold = fold_num,
+      feature = names(imp),
+      importance = as.numeric(imp)
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      importance = importance
+    )
   }
 )
 
-summary_dfs_noNLP  <- rsf_res_dfs_noNLP  |> 
-  pivot_longer(cols = -trees,
-               names_to = "fold",
-               values_to = "c_index") |> 
-  group_by(trees) |> 
-  summarise(mean_c_index = mean(c_index),
-            sd_c_index = sd(c_index),
-            lower_95 = quantile(c_index, 0.025),
-            upper_95 = quantile(c_index, 0.975),
-            .groups = "drop") 
-
-summary_dfs_noNLP  |> 
-  ggplot(mapping = aes(x = trees, 
-                       y = mean_c_index)) +
-  geom_line() +
-  geom_ribbon(aes(ymin = lower_95, 
-                  ymax = upper_95),
-              alpha = 0.2) +
-  labs(
-    x = "Number of trees",
-    y = "C-index (95% CI)",
-    title = "Random survival forest model (DFS)",
-    subtitle = "Feature sets included: no NLP") +
-  theme_minimal()
-
-ggsave(paste0("../results/07_tree_plot_DFS_noNLP_",
-              rule,
-              ".png"))
-
-final_dfs_noNLP  <- summary_dfs_noNLP  |> 
-  filter(trees == max(trees)) |> 
+predictions_dfs_noNLP <- map_dfr(results_dfs_noNLP, "predictions") |> 
   mutate(model = "RSF",
-         features = "noNLP",
          outcome = "DFS",
-         rule = rule) |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, rule))
+         features = "noNLP")
 
-final_dfs_noNLP 
+predictions_dfs_noNLP
 
-write_tsv(final_dfs_noNLP,
-          file = "../results/07_rsf_models_results.tsv",
+write_tsv(predictions_dfs_noNLP,
+          file = "../results/07_rsf_predictions.tsv",
+          append = TRUE)
+
+metrics_dfs_noNLP <- map_dfr(results_dfs_noNLP, "metrics") |> 
+  mutate(model = "RSF",
+         outcome = "DFS",
+         features = "noNLP")
+
+metrics_dfs_noNLP
+
+write_tsv(metrics_dfs_noNLP,
+          file = "../results/07_rsf_results.tsv",
+          append = TRUE)
+
+
+importance_dfs_noNLP <- map_dfr(results_dfs_noNLP, "importance") |> 
+  mutate(model = "RSF",
+         outcome = "DFS",
+         features = "noNLP")
+
+importance_dfs_noNLP
+
+write_tsv(importance_dfs_noNLP,
+          file = "../results/07_rsf_vimp.tsv",
           append = TRUE)
 ```
 
@@ -677,91 +925,132 @@ write_tsv(final_dfs_noNLP,
 #| echo: true
 #| warning: false
 
-rsf_res_dfs_nogenomic <- map_dfr(tree_grid,
-                                  function(trees) {
-
-    fold_c <- map_dbl(folds_dfs_nogenomic,
-                      ~ {
-                        
-        data <- data_dfs_nogenomic |> 
-          select(- c(patient_id,
-                     sample_id))
-                        
-        test_idx  <- .x
-        train_idx <- setdiff(seq_len(nrow(data)), 
-                             test_idx)
-
-        train_data <- data[train_idx, ]
-        test_data  <- data[test_idx, ]
-
-        fit <- rfsrc(Surv(years_to_dfs_event, 
-                          dfs_status) ~ .,
-                     data = train_data,
-                     ntree = trees,
-                     splitrule = rule)
-
-        pred <- predict(fit, 
-                        newdata = test_data)
-        
-        risk <- -pred$predicted
-
-        concordance(Surv(test_data$years_to_dfs_event, 
-                         test_data$dfs_status) ~ risk)$concordance
-      }
+results_dfs_nogenomic <- imap(
+  folds_dfs_nogenomic,
+  ~ {
+    fold_idx <- .x
+    fold_num <- .y
+    
+    data <- data_dfs_nogenomic |> 
+      select(-c(patient_id, sample_id))
+    
+    # Split train / test
+    train_idx <- setdiff(seq_len(nrow(data)),
+                         fold_idx)
+    train_data <- data[train_idx, ]
+    test_data  <- data[fold_idx, ]
+    
+    # Fit RSF
+    fit <- rfsrc(Surv(years_to_dfs_event, 
+                      dfs_status) ~ ., 
+                 data = train_data,
+                 ntree = trees,
+                 splitrule = rule,
+                 importance = TRUE)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred$predicted
+    
+    predictions <- tibble(
+      fold = fold_num,
+      id = test_data$patient_id,
+      dfs_status = test_data$dfs_status,
+      years_to_dfs_event = test_data$years_to_dfs_event,
+      risk = risk
     )
-
-    tibble(trees = trees,
-           c_fold_1 = fold_c[1],
-           c_fold_2 = fold_c[2],
-           c_fold_3 = fold_c[3],
-           c_fold_4 = fold_c[4],
-           c_fold_5 = fold_c[5])
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_dfs_event, 
+           test_data$dfs_status) ~ risk
+    )$concordance
+    
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_dfs_event <= t & test_data$dfs_status == 1 ~ 1,
+        test_data$years_to_dfs_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(response = status_t[keep],
+              predictor = risk[keep],
+              quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    auc_12_months <- compute_auc(1)
+    auc_18_months <- compute_auc(1.5)
+    auc_24_months <- compute_auc(2)
+    auc_36_months <- compute_auc(3)
+    
+    metrics <- tibble(
+      fold = fold_num,
+      c_index = c_index,
+      auc_12_months = auc_12_months,
+      auc_18_months = auc_18_months,
+      auc_24_months = auc_24_months,
+      auc_36_months = auc_36_months
+    )
+    
+    # Store variable importance
+    imp <- fit$importance
+    
+    importance <- tibble(
+      fold = fold_num,
+      feature = names(imp),
+      importance = as.numeric(imp)
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      importance = importance
+    )
   }
 )
 
-summary_dfs_nogenomic  <- rsf_res_dfs_nogenomic  |> 
-  pivot_longer(cols = -trees,
-               names_to = "fold",
-               values_to = "c_index") |> 
-  group_by(trees) |> 
-  summarise(mean_c_index = mean(c_index),
-            sd_c_index = sd(c_index),
-            lower_95 = quantile(c_index, 0.025),
-            upper_95 = quantile(c_index, 0.975),
-            .groups = "drop") 
-
-summary_dfs_nogenomic  |> 
-  ggplot(mapping = aes(x = trees, 
-                       y = mean_c_index)) +
-  geom_line() +
-  geom_ribbon(aes(ymin = lower_95, 
-                  ymax = upper_95),
-              alpha = 0.2) +
-  labs(
-    x = "Number of trees",
-    y = "C-index (95% CI)",
-    title = "Random survival forest model (DFS)",
-    subtitle = "Feature sets included: no genomic") +
-  theme_minimal()
-
-ggsave(paste0("../results/07_tree_plot_DFS_nogenomic_",
-              rule,
-              ".png"))
-
-final_dfs_nogenomic  <- summary_dfs_nogenomic  |> 
-  filter(trees == max(trees)) |> 
+predictions_dfs_nogenomic <- map_dfr(results_dfs_nogenomic, "predictions") |> 
   mutate(model = "RSF",
-         features = "nogenomic",
          outcome = "DFS",
-         rule = rule) |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, rule))
+         features = "nogenomic")
 
-final_dfs_nogenomic 
+predictions_dfs_nogenomic
 
-write_tsv(final_dfs_nogenomic,
-          file = "../results/07_rsf_models_results.tsv",
+write_tsv(predictions_dfs_nogenomic,
+          file = "../results/07_rsf_predictions.tsv",
+          append = TRUE)
+
+metrics_dfs_nogenomic <- map_dfr(results_dfs_nogenomic, "metrics") |> 
+  mutate(model = "RSF",
+         outcome = "DFS",
+         features = "nogenomic")
+
+metrics_dfs_nogenomic
+
+write_tsv(metrics_dfs_nogenomic,
+          file = "../results/07_rsf_results.tsv",
+          append = TRUE)
+
+
+importance_dfs_nogenomic <- map_dfr(results_dfs_nogenomic, "importance") |> 
+  mutate(model = "RSF",
+         outcome = "DFS",
+         features = "nogenomic")
+
+importance_dfs_nogenomic
+
+write_tsv(importance_dfs_nogenomic,
+          file = "../results/07_rsf_vimp.tsv",
           append = TRUE)
 ```
 
@@ -772,90 +1061,131 @@ write_tsv(final_dfs_nogenomic,
 #| echo: true
 #| warning: false
 
-rsf_res_dfs_noNLPgenomic <- map_dfr(tree_grid,
-                                     function(trees) {
-
-    fold_c <- map_dbl(folds_dfs_noNLPgenomic,
-                      ~ {
-                        
-        data <- data_dfs_noNLPgenomic |> 
-          select(- c(patient_id,
-                     sample_id))
-                        
-        test_idx  <- .x
-        train_idx <- setdiff(seq_len(nrow(data)), 
-                             test_idx)
-
-        train_data <- data[train_idx, ]
-        test_data  <- data[test_idx, ]
-
-        fit <- rfsrc(Surv(years_to_dfs_event, 
-                          dfs_status) ~ .,
-                     data = train_data,
-                     ntree = trees,
-                     splitrule = rule)
-
-        pred <- predict(fit, 
-                        newdata = test_data)
-        
-        risk <- -pred$predicted
-
-        concordance(Surv(test_data$years_to_dfs_event, 
-                         test_data$dfs_status) ~ risk)$concordance
-      }
+results_dfs_noNLPgenomic <- imap(
+  folds_dfs_noNLPgenomic,
+  ~ {
+    fold_idx <- .x
+    fold_num <- .y
+    
+    data <- data_dfs_noNLPgenomic |> 
+      select(-c(patient_id, sample_id))
+    
+    # Split train / test
+    train_idx <- setdiff(seq_len(nrow(data)),
+                         fold_idx)
+    train_data <- data[train_idx, ]
+    test_data  <- data[fold_idx, ]
+    
+    # Fit RSF
+    fit <- rfsrc(Surv(years_to_dfs_event, 
+                      dfs_status) ~ ., 
+                 data = train_data,
+                 ntree = trees,
+                 splitrule = rule,
+                 importance = TRUE)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred$predicted
+    
+    predictions <- tibble(
+      fold = fold_num,
+      id = test_data$patient_id,
+      dfs_status = test_data$dfs_status,
+      years_to_dfs_event = test_data$years_to_dfs_event,
+      risk = risk
     )
-
-    tibble(trees = trees,
-           c_fold_1 = fold_c[1],
-           c_fold_2 = fold_c[2],
-           c_fold_3 = fold_c[3],
-           c_fold_4 = fold_c[4],
-           c_fold_5 = fold_c[5])
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_dfs_event, 
+           test_data$dfs_status) ~ risk
+    )$concordance
+    
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_dfs_event <= t & test_data$dfs_status == 1 ~ 1,
+        test_data$years_to_dfs_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(response = status_t[keep],
+              predictor = risk[keep],
+              quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    auc_12_months <- compute_auc(1)
+    auc_18_months <- compute_auc(1.5)
+    auc_24_months <- compute_auc(2)
+    auc_36_months <- compute_auc(3)
+    
+    metrics <- tibble(
+      fold = fold_num,
+      c_index = c_index,
+      auc_12_months = auc_12_months,
+      auc_18_months = auc_18_months,
+      auc_24_months = auc_24_months,
+      auc_36_months = auc_36_months
+    )
+    
+    # Store variable importance
+    imp <- fit$importance
+    
+    importance <- tibble(
+      fold = fold_num,
+      feature = names(imp),
+      importance = as.numeric(imp)
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      importance = importance
+    )
   }
 )
 
-summary_dfs_noNLPgenomic  <- rsf_res_dfs_noNLPgenomic  |> 
-  pivot_longer(cols = -trees,
-               names_to = "fold",
-               values_to = "c_index") |> 
-  group_by(trees) |> 
-  summarise(mean_c_index = mean(c_index),
-            sd_c_index = sd(c_index),
-            lower_95 = quantile(c_index, 0.025),
-            upper_95 = quantile(c_index, 0.975),
-            .groups = "drop") 
-
-summary_dfs_noNLPgenomic  |> 
-  ggplot(mapping = aes(x = trees, 
-                       y = mean_c_index)) +
-  geom_line() +
-  geom_ribbon(aes(ymin = lower_95, 
-                  ymax = upper_95),
-              alpha = 0.2) +
-  labs(
-    x = "Number of trees",
-    y = "C-index (95% CI)",
-    title = "Random survival forest model (DFS)",
-    subtitle = "Feature sets included: no NLP or genomic") +
-  theme_minimal()
-
-ggsave(paste0("../results/07_tree_plot_DFS_noNLPgenomic_",
-              rule,
-              ".png"))
-
-final_dfs_noNLPgenomic  <- summary_dfs_noNLPgenomic  |> 
-  filter(trees == max(trees)) |> 
+predictions_dfs_noNLPgenomic <- map_dfr(results_dfs_noNLPgenomic, "predictions") |> 
   mutate(model = "RSF",
-         features = "noNLPgenomic",
          outcome = "DFS",
-         rule = rule) |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, rule))
+         features = "noNLPgenomic")
 
-final_dfs_noNLPgenomic 
+predictions_dfs_noNLPgenomic
 
-write_tsv(final_dfs_noNLPgenomic,
-          file = "../results/07_rsf_models_results.tsv",
+write_tsv(predictions_dfs_noNLPgenomic,
+          file = "../results/07_rsf_predictions.tsv",
+          append = TRUE)
+
+metrics_dfs_noNLPgenomic <- map_dfr(results_dfs_noNLPgenomic, "metrics") |> 
+  mutate(model = "RSF",
+         outcome = "DFS",
+         features = "noNLPgenomic")
+
+metrics_dfs_noNLPgenomic
+
+write_tsv(metrics_dfs_noNLPgenomic,
+          file = "../results/07_rsf_results.tsv",
+          append = TRUE)
+
+
+importance_dfs_noNLPgenomic <- map_dfr(results_dfs_noNLPgenomic, "importance") |> 
+  mutate(model = "RSF",
+         outcome = "DFS",
+         features = "noNLPgenomic")
+
+importance_dfs_noNLPgenomic
+
+write_tsv(importance_dfs_noNLPgenomic,
+          file = "../results/07_rsf_vimp.tsv",
           append = TRUE)
 ```
