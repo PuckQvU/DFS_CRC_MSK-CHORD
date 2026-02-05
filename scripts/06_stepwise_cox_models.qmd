@@ -15,6 +15,8 @@ format: html
 library("tidyverse")
 library("survival")
 library("caret")
+library("purrr")
+library("pROC")
 ```
 
 ```{r}
@@ -198,54 +200,210 @@ forward_cox_cv <- function(data,
 #| echo: true
 #| warning: false
 
-res_os <- forward_cox_cv(data = data_os,
-                         time_var = "years_to_os_event",
-                         status_var = "os_status",
-                         folds = folds_os)
+results_os <- forward_cox_cv(
+  data = data_os,
+  time_var = "years_to_os_event",
+  status_var = "os_status",
+  folds = folds_os
+)
 
-write_tsv(x = res_os,
-         file = paste0("../results/06_res_per_fold_OS_",
-                       as.character(max_iterations),
-                       "_max.tsv"))
+restuls_all_iterations_os <- results_os |> 
+  mutate(
+    model = "stepwise",
+    outcome = "OS",
+    features = "all"
+  )
 
-summary_os <- res_os |> 
+restuls_all_iterations_os
+
+write_tsv(restuls_all_iterations_os,
+          file = paste0("../results/06_res_all_iterations_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+
+results_os |> 
   group_by(iteration) |> 
-  summarise(mean_c_index = mean(c_index),
-            sd_c_index = sd(c_index),
-            lower_95 = quantile(c_index, 0.025),
-            upper_95 = quantile(c_index, 0.975),
-            .groups = "drop")
-
-summary_os |> 
-  ggplot(mapping = aes(x = iteration, 
-                       y = mean_c_index)) +
+  summarise(
+    mean_c_index = mean(c_index),
+    lower_95 = quantile(c_index, 0.025),
+    upper_95 = quantile(c_index, 0.975),
+    .groups = "drop"
+  ) |> 
+  ggplot(aes(x = iteration,
+             y = mean_c_index)) +
   geom_line() +
-  geom_ribbon(aes(ymin = lower_95, 
-                  ymax = upper_95),
-              alpha = 0.2) +
+  geom_ribbon(
+    aes(ymin = lower_95,
+        ymax = upper_95),
+    alpha = 0.2
+  ) +
   labs(
     x = "Number of features included",
     y = "C-index (95% CI)",
     title = "Forward stepwise Cox model (OS)",
     subtitle = "Feature sets included: all"
-    ) +
-  theme_minimal()
+  ) +
+  theme_bw()
 
 ggsave(paste0("../results/06_C_index_plot_OS_",
               as.character(max_iterations),
               "_max.png"))
 
-best_model_os <- summary_os |> 
-  filter(mean_c_index == max(mean_c_index)) |> 
-  mutate(model = "Forward_stepwise_Cox",
-         features = "all",
-         outcome = "OS") |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, iteration))
+feature_paths <- results_os |> 
+  arrange(fold, 
+          iteration) |> 
+  group_by(fold) |> 
+  summarise(
+    iteration = iteration,
+    feature_set = purrr::accumulate(
+      added_feature,
+      ~ c(.x, .y)
+    ),
+    .groups = "drop"
+  )
 
-write_tsv(best_model_os,
-          file = paste0("../results/06_stepwise_cox_models_results_",
+best_iter <- results_os |> 
+  group_by(fold) |> 
+  slice_max(
+    c_index,
+    n = 1,
+    with_ties = FALSE
+  ) |> 
+  select(fold, 
+         iteration)
+
+best_models <- best_iter |> 
+  left_join(feature_paths, by = c("fold", "iteration"))
+
+best_models
+
+final_models_os <- map(
+  seq_len(nrow(best_models)),
+  function(i) {
+
+    fold_name <- best_models$fold[i]
+    fold_idx  <- as.integer(gsub("Fold", "", fold_name))
+    selected_features <- best_models$feature_set[[i]]
+
+    # Split train / test
+    test_idx  <- folds_os[[fold_idx]]
+    train_idx <- setdiff(seq_len(nrow(data_os)), 
+                         test_idx)
+
+    train_data <- data_os[train_idx, ]
+    test_data  <- data_os[test_idx, ]
+
+    # Fit final model
+    formula <- as.formula(paste0(
+      "Surv(years_to_os_event, os_status) ~ ",
+      paste(selected_features, collapse = " + ")
+    ))
+
+    fit <- coxph(formula, 
+                 data = train_data)
+
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred
+
+    predictions <- tibble(
+      fold = fold_name,
+      id = test_data$patient_id,
+      os_status = test_data$os_status,
+      years_to_os_event = test_data$years_to_os_event,
+      risk = risk
+    )
+
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_os_event, 
+           test_data$os_status) ~ risk
+    )$concordance
+
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_os_event <= t & test_data$os_status == 1 ~ 1,
+        test_data$years_to_os_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(
+            status_t[keep],
+            risk[keep],
+            quiet = TRUE)$auc
+        )
+      }
+    }
+
+    metrics <- tibble(
+      fold = fold_name,
+      c_index = c_index,
+      auc_12_months = compute_auc(1),
+      auc_18_months = compute_auc(1.5),
+      auc_24_months = compute_auc(2),
+      auc_36_months = compute_auc(3)
+    )
+
+    # Store coefficients
+    coefs <- summary(fit)$coefficients
+    coefs <- tibble(
+      fold = fold_name,
+      feature = rownames(coefs),
+      beta = coefs[, "coef"],
+      p_value = coefs[, "Pr(>|z|)"]
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      coefficients = coefs
+    )
+  }
+)
+
+predictions_os <- map_dfr(final_models_os, "predictions") |> 
+  mutate(model = "stepwise",
+         outcome = "OS",
+         features = "all")
+
+predictions_os
+
+write_tsv(predictions_os,
+          file = paste0("../results/06_predictions_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+
+metrics_os <- map_dfr(final_models_os, "metrics") |> 
+  mutate(model = "stepwise",
+         outcome = "OS",
+         features = "all")
+
+metrics_os
+
+write_tsv(metrics_os,
+          file = paste0("../results/06_results_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+
+coefficients_os <- map_dfr(final_models_os, "coefficients") |> 
+  mutate(model = "stepwise",
+         outcome = "OS",
+         features = "all")
+
+coefficients_os
+
+write_tsv(coefficients_os,
+          file = paste0("../results/06_coefs_",
                         as.character(max_iterations),
                         "_max.tsv"),
           append = TRUE)
@@ -258,54 +416,210 @@ write_tsv(best_model_os,
 #| echo: true
 #| warning: false
 
-res_os_noNLP <- forward_cox_cv(data = data_os_noNLP,
-                               time_var = "years_to_os_event",
-                               status_var = "os_status",
-                               folds = folds_os_noNLP)
+results_os_noNLP <- forward_cox_cv(
+  data = data_os_noNLP,
+  time_var = "years_to_os_event",
+  status_var = "os_status",
+  folds = folds_os_noNLP
+)
 
-write_tsv(x = res_os_noNLP,
-          file = paste0("../results/06_res_per_fold_OS_noNLP_",
+restuls_all_iterations_os_noNLP <- results_os_noNLP |> 
+  mutate(
+    model = "stepwise",
+    outcome = "OS",
+    features = "all"
+  )
+
+restuls_all_iterations_os_noNLP
+
+write_tsv(restuls_all_iterations_os_noNLP,
+          file = paste0("../results/06_res_all_iterations_",
                         as.character(max_iterations),
-                        "_max.tsv"))
+                        "_max.tsv"),
+          append = TRUE)
 
-summary_os_noNLP <- res_os_noNLP |> 
+results_os_noNLP |> 
   group_by(iteration) |> 
-  summarise(mean_c_index = mean(c_index),
-            sd_c_index = sd(c_index),
-            lower_95 = quantile(c_index, 0.025),
-            upper_95 = quantile(c_index, 0.975),
-            .groups = "drop")
-
-summary_os_noNLP |> 
-  ggplot(mapping = aes(x = iteration, 
-                       y = mean_c_index)) +
+  summarise(
+    mean_c_index = mean(c_index),
+    lower_95 = quantile(c_index, 0.025),
+    upper_95 = quantile(c_index, 0.975),
+    .groups = "drop"
+  ) |> 
+  ggplot(aes(x = iteration,
+             y = mean_c_index)) +
   geom_line() +
-  geom_ribbon(aes(ymin = lower_95, 
-                  ymax = upper_95),
-              alpha = 0.2) +
+  geom_ribbon(
+    aes(ymin = lower_95,
+        ymax = upper_95),
+    alpha = 0.2
+  ) +
   labs(
     x = "Number of features included",
     y = "C-index (95% CI)",
     title = "Forward stepwise Cox model (OS)",
     subtitle = "Feature sets included: no NLP"
-    ) +
-  theme_minimal()
+  ) +
+  theme_bw()
 
 ggsave(paste0("../results/06_C_index_plot_OS_noNLP_",
               as.character(max_iterations),
               "_max.png"))
 
-best_model_os_noNLP <- summary_os_noNLP |> 
-  filter(mean_c_index == max(mean_c_index)) |> 
-  mutate(model = "Forward_stepwise_Cox",
-         features = "noNLP",
-         outcome = "OS") |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, iteration))
+feature_paths <- results_os_noNLP |> 
+  arrange(fold, 
+          iteration) |> 
+  group_by(fold) |> 
+  summarise(
+    iteration = iteration,
+    feature_set = purrr::accumulate(
+      added_feature,
+      ~ c(.x, .y)
+    ),
+    .groups = "drop"
+  )
 
-write_tsv(best_model_os_noNLP,
-          file = paste0("../results/06_stepwise_cox_models_results_",
+best_iter <- results_os_noNLP |> 
+  group_by(fold) |> 
+  slice_max(
+    c_index,
+    n = 1,
+    with_ties = FALSE
+  ) |> 
+  select(fold, 
+         iteration)
+
+best_models <- best_iter |> 
+  left_join(feature_paths, by = c("fold", "iteration"))
+
+best_models
+
+final_models_os_noNLP <- map(
+  seq_len(nrow(best_models)),
+  function(i) {
+    
+    fold_name <- best_models$fold[i]
+    fold_idx  <- as.integer(gsub("Fold", "", fold_name))
+    selected_features <- best_models$feature_set[[i]]
+    
+    # Split train / test
+    test_idx  <- folds_os_noNLP[[fold_idx]]
+    train_idx <- setdiff(seq_len(nrow(data_os_noNLP)), 
+                         test_idx)
+    
+    train_data <- data_os_noNLP[train_idx, ]
+    test_data  <- data_os_noNLP[test_idx, ]
+    
+    # Fit final model
+    formula <- as.formula(paste0(
+      "Surv(years_to_os_event, os_status) ~ ",
+      paste(selected_features, collapse = " + ")
+    ))
+    
+    fit <- coxph(formula, 
+                 data = train_data)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred
+    
+    predictions <- tibble(
+      fold = fold_name,
+      id = test_data$patient_id,
+      os_status = test_data$os_status,
+      years_to_os_event = test_data$years_to_os_event,
+      risk = risk
+    )
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_os_event, 
+           test_data$os_status) ~ risk
+    )$concordance
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_os_event <= t & test_data$os_status == 1 ~ 1,
+        test_data$years_to_os_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(
+            status_t[keep],
+            risk[keep],
+            quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    metrics <- tibble(
+      fold = fold_name,
+      c_index = c_index,
+      auc_12_months = compute_auc(1),
+      auc_18_months = compute_auc(1.5),
+      auc_24_months = compute_auc(2),
+      auc_36_months = compute_auc(3)
+    )
+    
+    # Store coefficients
+    coefs <- summary(fit)$coefficients
+    coefs <- tibble(
+      fold = fold_name,
+      feature = rownames(coefs),
+      beta = coefs[, "coef"],
+      p_value = coefs[, "Pr(>|z|)"]
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      coefficients = coefs
+    )
+  }
+)
+
+predictions_os_noNLP <- map_dfr(final_models_os_noNLP, "predictions") |> 
+  mutate(model = "stepwise",
+         outcome = "OS",
+         features = "all")
+
+predictions_os_noNLP
+
+write_tsv(predictions_os_noNLP,
+          file = paste0("../results/06_predictions_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+
+metrics_os_noNLP <- map_dfr(final_models_os_noNLP, "metrics") |> 
+  mutate(model = "stepwise",
+         outcome = "OS",
+         features = "all")
+
+metrics_os_noNLP
+
+write_tsv(metrics_os_noNLP,
+          file = paste0("../results/06_results_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+
+coefficients_os_noNLP <- map_dfr(final_models_os_noNLP, "coefficients") |> 
+  mutate(model = "stepwise",
+         outcome = "OS",
+         features = "all")
+
+coefficients_os_noNLP
+
+write_tsv(coefficients_os_noNLP,
+          file = paste0("../results/06_coefs_",
                         as.character(max_iterations),
                         "_max.tsv"),
           append = TRUE)
@@ -318,54 +632,210 @@ write_tsv(best_model_os_noNLP,
 #| echo: true
 #| warning: false
 
-res_os_nogenomic <- forward_cox_cv(data = data_os_nogenomic,
-                                   time_var = "years_to_os_event",
-                                   status_var = "os_status",
-                                   folds = folds_os_nogenomic)
+results_os_nogenomic <- forward_cox_cv(
+  data = data_os_nogenomic,
+  time_var = "years_to_os_event",
+  status_var = "os_status",
+  folds = folds_os_nogenomic
+)
 
-write_tsv(x = res_os_nogenomic,
-          file = paste0("../results/06_res_per_fold_OS_nogenomic_",
+restuls_all_iterations_os_nogenomic <- results_os_nogenomic |> 
+  mutate(
+    model = "stepwise",
+    outcome = "OS",
+    features = "all"
+  )
+
+restuls_all_iterations_os_nogenomic
+
+write_tsv(restuls_all_iterations_os_nogenomic,
+          file = paste0("../results/06_res_all_iterations_",
                         as.character(max_iterations),
-                        "_max.tsv"))
+                        "_max.tsv"),
+          append = TRUE)
 
-summary_os_nogenomic <- res_os_nogenomic |> 
+results_os_nogenomic |> 
   group_by(iteration) |> 
-  summarise(mean_c_index = mean(c_index),
-            sd_c_index = sd(c_index),
-            lower_95 = quantile(c_index, 0.025),
-            upper_95 = quantile(c_index, 0.975),
-            .groups = "drop")
-
-summary_os_nogenomic |> 
-  ggplot(mapping = aes(x = iteration, 
-                       y = mean_c_index)) +
+  summarise(
+    mean_c_index = mean(c_index),
+    lower_95 = quantile(c_index, 0.025),
+    upper_95 = quantile(c_index, 0.975),
+    .groups = "drop"
+  ) |> 
+  ggplot(aes(x = iteration,
+             y = mean_c_index)) +
   geom_line() +
-  geom_ribbon(aes(ymin = lower_95, 
-                  ymax = upper_95),
-              alpha = 0.2) +
+  geom_ribbon(
+    aes(ymin = lower_95,
+        ymax = upper_95),
+    alpha = 0.2
+  ) +
   labs(
     x = "Number of features included",
     y = "C-index (95% CI)",
     title = "Forward stepwise Cox model (OS)",
     subtitle = "Feature sets included: no genomic"
-    ) +
-  theme_minimal()
+  ) +
+  theme_bw()
 
 ggsave(paste0("../results/06_C_index_plot_OS_nogenomic_",
               as.character(max_iterations),
               "_max.png"))
 
-best_model_os_nogenomic <- summary_os_nogenomic |> 
-  filter(mean_c_index == max(mean_c_index)) |> 
-  mutate(model = "Forward_stepwise_Cox",
-         features = "nogenomic",
-         outcome = "OS") |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, iteration))
+feature_paths <- results_os_nogenomic |> 
+  arrange(fold, 
+          iteration) |> 
+  group_by(fold) |> 
+  summarise(
+    iteration = iteration,
+    feature_set = purrr::accumulate(
+      added_feature,
+      ~ c(.x, .y)
+    ),
+    .groups = "drop"
+  )
 
-write_tsv(best_model_os_nogenomic,
-          file = paste0("../results/06_stepwise_cox_models_results_",
+best_iter <- results_os_nogenomic |> 
+  group_by(fold) |> 
+  slice_max(
+    c_index,
+    n = 1,
+    with_ties = FALSE
+  ) |> 
+  select(fold, 
+         iteration)
+
+best_models <- best_iter |> 
+  left_join(feature_paths, by = c("fold", "iteration"))
+
+best_models
+
+final_models_os_nogenomic <- map(
+  seq_len(nrow(best_models)),
+  function(i) {
+    
+    fold_name <- best_models$fold[i]
+    fold_idx  <- as.integer(gsub("Fold", "", fold_name))
+    selected_features <- best_models$feature_set[[i]]
+    
+    # Split train / test
+    test_idx  <- folds_os_nogenomic[[fold_idx]]
+    train_idx <- setdiff(seq_len(nrow(data_os_nogenomic)), 
+                         test_idx)
+    
+    train_data <- data_os_nogenomic[train_idx, ]
+    test_data  <- data_os_nogenomic[test_idx, ]
+    
+    # Fit final model
+    formula <- as.formula(paste0(
+      "Surv(years_to_os_event, os_status) ~ ",
+      paste(selected_features, collapse = " + ")
+    ))
+    
+    fit <- coxph(formula, 
+                 data = train_data)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred
+    
+    predictions <- tibble(
+      fold = fold_name,
+      id = test_data$patient_id,
+      os_status = test_data$os_status,
+      years_to_os_event = test_data$years_to_os_event,
+      risk = risk
+    )
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_os_event, 
+           test_data$os_status) ~ risk
+    )$concordance
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_os_event <= t & test_data$os_status == 1 ~ 1,
+        test_data$years_to_os_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(
+            status_t[keep],
+            risk[keep],
+            quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    metrics <- tibble(
+      fold = fold_name,
+      c_index = c_index,
+      auc_12_months = compute_auc(1),
+      auc_18_months = compute_auc(1.5),
+      auc_24_months = compute_auc(2),
+      auc_36_months = compute_auc(3)
+    )
+    
+    # Store coefficients
+    coefs <- summary(fit)$coefficients
+    coefs <- tibble(
+      fold = fold_name,
+      feature = rownames(coefs),
+      beta = coefs[, "coef"],
+      p_value = coefs[, "Pr(>|z|)"]
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      coefficients = coefs
+    )
+  }
+)
+
+predictions_os_nogenomic <- map_dfr(final_models_os_nogenomic, "predictions") |> 
+  mutate(model = "stepwise",
+         outcome = "OS",
+         features = "all")
+
+predictions_os_nogenomic
+
+write_tsv(predictions_os_nogenomic,
+          file = paste0("../results/06_predictions_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+
+metrics_os_nogenomic <- map_dfr(final_models_os_nogenomic, "metrics") |> 
+  mutate(model = "stepwise",
+         outcome = "OS",
+         features = "all")
+
+metrics_os_nogenomic
+
+write_tsv(metrics_os_nogenomic,
+          file = paste0("../results/06_results_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+
+coefficients_os_nogenomic <- map_dfr(final_models_os_nogenomic, "coefficients") |> 
+  mutate(model = "stepwise",
+         outcome = "OS",
+         features = "all")
+
+coefficients_os_nogenomic
+
+write_tsv(coefficients_os_nogenomic,
+          file = paste0("../results/06_coefs_",
                         as.character(max_iterations),
                         "_max.tsv"),
           append = TRUE)
@@ -378,60 +848,218 @@ write_tsv(best_model_os_nogenomic,
 #| echo: true
 #| warning: false
 
-res_os_noNLPgenomic <- forward_cox_cv(data = data_os_noNLPgenomic,
-                                      time_var = "years_to_os_event",
-                                      status_var = "os_status",
-                                      folds = folds_os_noNLPgenomic)
+results_os_noNLPgenomic <- forward_cox_cv(
+  data = data_os_noNLPgenomic,
+  time_var = "years_to_os_event",
+  status_var = "os_status",
+  folds = folds_os_noNLPgenomic
+)
 
-write_tsv(x = res_os_noNLPgenomic,
-          file = paste0("../results/06_res_per_fold_OS_noNLPgenomic_",
+restuls_all_iterations_os_noNLPgenomic <- results_os_noNLPgenomic |> 
+  mutate(
+    model = "stepwise",
+    outcome = "OS",
+    features = "all"
+  )
+
+restuls_all_iterations_os_noNLPgenomic
+
+write_tsv(restuls_all_iterations_os_noNLPgenomic,
+          file = paste0("../results/06_res_all_iterations_",
                         as.character(max_iterations),
-                        "_max.tsv"))
+                        "_max.tsv"),
+          append = TRUE)
 
-summary_os_noNLPgenomic <- res_os_noNLPgenomic |> 
+results_os_noNLPgenomic |> 
   group_by(iteration) |> 
-  summarise(mean_c_index = mean(c_index),
-            sd_c_index = sd(c_index),
-            lower_95 = quantile(c_index, 0.025),
-            upper_95 = quantile(c_index, 0.975),
-            .groups = "drop")
-
-summary_os_noNLPgenomic |> 
-  ggplot(mapping = aes(x = iteration, 
-                       y = mean_c_index)) +
+  summarise(
+    mean_c_index = mean(c_index),
+    lower_95 = quantile(c_index, 0.025),
+    upper_95 = quantile(c_index, 0.975),
+    .groups = "drop"
+  ) |> 
+  ggplot(aes(x = iteration,
+             y = mean_c_index)) +
   geom_line() +
-  geom_ribbon(aes(ymin = lower_95, 
-                  ymax = upper_95),
-              alpha = 0.2) +
+  geom_ribbon(
+    aes(ymin = lower_95,
+        ymax = upper_95),
+    alpha = 0.2
+  ) +
   labs(
     x = "Number of features included",
     y = "C-index (95% CI)",
     title = "Forward stepwise Cox model (OS)",
     subtitle = "Feature sets included: no NLP or genomic"
-    ) +
-  theme_minimal()
+  ) +
+  theme_bw()
 
 ggsave(paste0("../results/06_C_index_plot_OS_noNLPgenomic_",
               as.character(max_iterations),
               "_max.png"))
 
-best_model_os_noNLPgenomic <- summary_os_noNLPgenomic |> 
-  filter(mean_c_index == max(mean_c_index)) |> 
-  mutate(model = "Forward_stepwise_Cox",
-         features = "noNLPgenomic",
-         outcome = "OS") |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, iteration))
+feature_paths <- results_os_noNLPgenomic |> 
+  arrange(fold, 
+          iteration) |> 
+  group_by(fold) |> 
+  summarise(
+    iteration = iteration,
+    feature_set = purrr::accumulate(
+      added_feature,
+      ~ c(.x, .y)
+    ),
+    .groups = "drop"
+  )
 
-write_tsv(best_model_os_noNLPgenomic,
-          file = paste0("../results/06_stepwise_cox_models_results_",
+best_iter <- results_os_noNLPgenomic |> 
+  group_by(fold) |> 
+  slice_max(
+    c_index,
+    n = 1,
+    with_ties = FALSE
+  ) |> 
+  select(fold, 
+         iteration)
+
+best_models <- best_iter |> 
+  left_join(feature_paths, by = c("fold", "iteration"))
+
+best_models
+
+final_models_os_noNLPgenomic <- map(
+  seq_len(nrow(best_models)),
+  function(i) {
+    
+    fold_name <- best_models$fold[i]
+    fold_idx  <- as.integer(gsub("Fold", "", fold_name))
+    selected_features <- best_models$feature_set[[i]]
+    
+    # Split train / test
+    test_idx  <- folds_os_noNLPgenomic[[fold_idx]]
+    train_idx <- setdiff(seq_len(nrow(data_os_noNLPgenomic)), 
+                         test_idx)
+    
+    train_data <- data_os_noNLPgenomic[train_idx, ]
+    test_data  <- data_os_noNLPgenomic[test_idx, ]
+    
+    # Fit final model
+    formula <- as.formula(paste0(
+      "Surv(years_to_os_event, os_status) ~ ",
+      paste(selected_features, collapse = " + ")
+    ))
+    
+    fit <- coxph(formula, 
+                 data = train_data)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred
+    
+    predictions <- tibble(
+      fold = fold_name,
+      id = test_data$patient_id,
+      os_status = test_data$os_status,
+      years_to_os_event = test_data$years_to_os_event,
+      risk = risk
+    )
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_os_event, 
+           test_data$os_status) ~ risk
+    )$concordance
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_os_event <= t & test_data$os_status == 1 ~ 1,
+        test_data$years_to_os_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(
+            status_t[keep],
+            risk[keep],
+            quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    metrics <- tibble(
+      fold = fold_name,
+      c_index = c_index,
+      auc_12_months = compute_auc(1),
+      auc_18_months = compute_auc(1.5),
+      auc_24_months = compute_auc(2),
+      auc_36_months = compute_auc(3)
+    )
+    
+    # Store coefficients
+    coefs <- summary(fit)$coefficients
+    coefs <- tibble(
+      fold = fold_name,
+      feature = rownames(coefs),
+      beta = coefs[, "coef"],
+      p_value = coefs[, "Pr(>|z|)"]
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      coefficients = coefs
+    )
+  }
+)
+
+predictions_os_noNLPgenomic <- map_dfr(final_models_os_noNLPgenomic, "predictions") |> 
+  mutate(model = "stepwise",
+         outcome = "OS",
+         features = "all")
+
+predictions_os_noNLPgenomic
+
+write_tsv(predictions_os_noNLPgenomic,
+          file = paste0("../results/06_predictions_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+
+metrics_os_noNLPgenomic <- map_dfr(final_models_os_noNLPgenomic, "metrics") |> 
+  mutate(model = "stepwise",
+         outcome = "OS",
+         features = "all")
+
+metrics_os_noNLPgenomic
+
+write_tsv(metrics_os_noNLPgenomic,
+          file = paste0("../results/06_results_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+
+coefficients_os_noNLPgenomic <- map_dfr(final_models_os_noNLPgenomic, "coefficients") |> 
+  mutate(model = "stepwise",
+         outcome = "OS",
+         features = "all")
+
+coefficients_os_noNLPgenomic
+
+write_tsv(coefficients_os_noNLPgenomic,
+          file = paste0("../results/06_coefs_",
                         as.character(max_iterations),
                         "_max.tsv"),
           append = TRUE)
 ```
 
 # Predicting DFS
+
+S
 
 ## All features
 
@@ -440,54 +1068,210 @@ write_tsv(best_model_os_noNLPgenomic,
 #| echo: true
 #| warning: false
 
-res_dfs <- forward_cox_cv(data = data_dfs,
-                          time_var = "years_to_dfs_event",
-                          status_var = "dfs_status",
-                          folds = folds_dfs)
+results_dfs <- forward_cox_cv(
+  data = data_dfs,
+  time_var = "years_to_dfs_event",
+  status_var = "dfs_status",
+  folds = folds_dfs
+)
 
-write_tsv(x = res_dfs,
-          file = paste0("../results/06_res_per_fold_DFS_",
+restuls_all_iterations_dfs <- results_dfs |> 
+  mutate(
+    model = "stepwise",
+    outcome = "DFS",
+    features = "all"
+  )
+
+restuls_all_iterations_dfs
+
+write_tsv(restuls_all_iterations_dfs,
+          file = paste0("../results/06_res_all_iterations_",
                         as.character(max_iterations),
-                        "_max.tsv"))
+                        "_max.tsv"),
+          append = TRUE)
 
-summary_dfs <- res_dfs |> 
+results_dfs |> 
   group_by(iteration) |> 
-  summarise(mean_c_index = mean(c_index),
-            sd_c_index = sd(c_index),
-            lower_95 = quantile(c_index, 0.025),
-            upper_95 = quantile(c_index, 0.975),
-            .groups = "drop")
-
-summary_dfs |> 
-  ggplot(mapping = aes(x = iteration, 
-                       y = mean_c_index)) +
+  summarise(
+    mean_c_index = mean(c_index),
+    lower_95 = quantile(c_index, 0.025),
+    upper_95 = quantile(c_index, 0.975),
+    .groups = "drop"
+  ) |> 
+  ggplot(aes(x = iteration,
+             y = mean_c_index)) +
   geom_line() +
-  geom_ribbon(aes(ymin = lower_95, 
-                  ymax = upper_95),
-              alpha = 0.2) +
+  geom_ribbon(
+    aes(ymin = lower_95,
+        ymax = upper_95),
+    alpha = 0.2
+  ) +
   labs(
     x = "Number of features included",
     y = "C-index (95% CI)",
     title = "Forward stepwise Cox model (DFS)",
     subtitle = "Feature sets included: all"
-    ) +
-  theme_minimal()
+  ) +
+  theme_bw()
 
 ggsave(paste0("../results/06_C_index_plot_DFS_",
               as.character(max_iterations),
               "_max.png"))
 
-best_model_dfs <- summary_dfs |> 
-  filter(mean_c_index == max(mean_c_index)) |> 
-  mutate(model = "Forward_stepwise_Cox",
-         features = "all",
-         outcome = "DFS") |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, iteration))
+feature_paths <- results_dfs |> 
+  arrange(fold, 
+          iteration) |> 
+  group_by(fold) |> 
+  summarise(
+    iteration = iteration,
+    feature_set = purrr::accumulate(
+      added_feature,
+      ~ c(.x, .y)
+    ),
+    .groups = "drop"
+  )
 
-write_tsv(best_model_dfs,
-          file = paste0("../results/06_stepwise_cox_models_results_",
+best_iter <- results_dfs |> 
+  group_by(fold) |> 
+  slice_max(
+    c_index,
+    n = 1,
+    with_ties = FALSE
+  ) |> 
+  select(fold, 
+         iteration)
+
+best_models <- best_iter |> 
+  left_join(feature_paths, by = c("fold", "iteration"))
+
+best_models
+
+final_models_dfs <- map(
+  seq_len(nrow(best_models)),
+  function(i) {
+    
+    fold_name <- best_models$fold[i]
+    fold_idx  <- as.integer(gsub("Fold", "", fold_name))
+    selected_features <- best_models$feature_set[[i]]
+    
+    # Split train / test
+    test_idx  <- folds_dfs[[fold_idx]]
+    train_idx <- setdiff(seq_len(nrow(data_dfs)), 
+                         test_idx)
+    
+    train_data <- data_dfs[train_idx, ]
+    test_data  <- data_dfs[test_idx, ]
+    
+    # Fit final model
+    formula <- as.formula(paste0(
+      "Surv(years_to_dfs_event, dfs_status) ~ ",
+      paste(selected_features, collapse = " + ")
+    ))
+    
+    fit <- coxph(formula, 
+                 data = train_data)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred
+    
+    predictions <- tibble(
+      fold = fold_name,
+      id = test_data$patient_id,
+      dfs_status = test_data$dfs_status,
+      years_to_dfs_event = test_data$years_to_dfs_event,
+      risk = risk
+    )
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_dfs_event, 
+           test_data$dfs_status) ~ risk
+    )$concordance
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_dfs_event <= t & test_data$dfs_status == 1 ~ 1,
+        test_data$years_to_dfs_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(
+            status_t[keep],
+            risk[keep],
+            quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    metrics <- tibble(
+      fold = fold_name,
+      c_index = c_index,
+      auc_12_months = compute_auc(1),
+      auc_18_months = compute_auc(1.5),
+      auc_24_months = compute_auc(2),
+      auc_36_months = compute_auc(3)
+    )
+    
+    # Store coefficients
+    coefs <- summary(fit)$coefficients
+    coefs <- tibble(
+      fold = fold_name,
+      feature = rownames(coefs),
+      beta = coefs[, "coef"],
+      p_value = coefs[, "Pr(>|z|)"]
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      coefficients = coefs
+    )
+  }
+)
+
+predictions_dfs <- map_dfr(final_models_dfs, "predictions") |> 
+  mutate(model = "stepwise",
+         outcome = "DFS",
+         features = "all")
+
+predictions_dfs
+
+write_tsv(predictions_dfs,
+          file = paste0("../results/06_predictions_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+
+metrics_dfs <- map_dfr(final_models_dfs, "metrics") |> 
+  mutate(model = "stepwise",
+         outcome = "DFS",
+         features = "all")
+
+metrics_dfs
+
+write_tsv(metrics_dfs,
+          file = paste0("../results/06_results_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+
+coefficients_dfs <- map_dfr(final_models_dfs, "coefficients") |> 
+  mutate(model = "stepwise",
+         outcome = "DFS",
+         features = "all")
+
+coefficients_dfs
+
+write_tsv(coefficients_dfs,
+          file = paste0("../results/06_coefs_",
                         as.character(max_iterations),
                         "_max.tsv"),
           append = TRUE)
@@ -500,54 +1284,210 @@ write_tsv(best_model_dfs,
 #| echo: true
 #| warning: false
 
-res_dfs_noNLP <- forward_cox_cv(data = data_dfs_noNLP,
-                                time_var = "years_to_dfs_event",
-                                status_var = "dfs_status",
-                                folds = folds_dfs_noNLP)
+results_dfs_noNLP <- forward_cox_cv(
+  data = data_dfs_noNLP,
+  time_var = "years_to_dfs_event",
+  status_var = "dfs_status",
+  folds = folds_dfs_noNLP
+)
 
-write_tsv(x = res_dfs_noNLP,
-          file = paste0("../results/06_res_per_fold_DFS_noNLP_",
+restuls_all_iterations_dfs_noNLP <- results_dfs_noNLP |> 
+  mutate(
+    model = "stepwise",
+    outcome = "DFS",
+    features = "all"
+  )
+
+restuls_all_iterations_dfs_noNLP
+
+write_tsv(restuls_all_iterations_dfs_noNLP,
+          file = paste0("../results/06_res_all_iterations_",
                         as.character(max_iterations),
-                        "_max.tsv"))
+                        "_max.tsv"),
+          append = TRUE)
 
-summary_dfs_noNLP <- res_dfs_noNLP |> 
+results_dfs_noNLP |> 
   group_by(iteration) |> 
-  summarise(mean_c_index = mean(c_index),
-            sd_c_index = sd(c_index),
-            lower_95 = quantile(c_index, 0.025),
-            upper_95 = quantile(c_index, 0.975),
-            .groups = "drop")
-
-summary_dfs_noNLP |> 
-  ggplot(mapping = aes(x = iteration, 
-                       y = mean_c_index)) +
+  summarise(
+    mean_c_index = mean(c_index),
+    lower_95 = quantile(c_index, 0.025),
+    upper_95 = quantile(c_index, 0.975),
+    .groups = "drop"
+  ) |> 
+  ggplot(aes(x = iteration,
+             y = mean_c_index)) +
   geom_line() +
-  geom_ribbon(aes(ymin = lower_95, 
-                  ymax = upper_95),
-              alpha = 0.2) +
+  geom_ribbon(
+    aes(ymin = lower_95,
+        ymax = upper_95),
+    alpha = 0.2
+  ) +
   labs(
     x = "Number of features included",
     y = "C-index (95% CI)",
     title = "Forward stepwise Cox model (DFS)",
     subtitle = "Feature sets included: no NLP"
-    ) +
-  theme_minimal()
+  ) +
+  theme_bw()
 
 ggsave(paste0("../results/06_C_index_plot_DFS_noNLP_",
               as.character(max_iterations),
               "_max.png"))
 
-best_model_dfs_noNLP <- summary_dfs_noNLP |> 
-  filter(mean_c_index == max(mean_c_index)) |> 
-  mutate(model = "Forward_stepwise_Cox",
-         features = "noNLP",
-         outcome = "DFS") |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, iteration))
+feature_paths <- results_dfs_noNLP |> 
+  arrange(fold, 
+          iteration) |> 
+  group_by(fold) |> 
+  summarise(
+    iteration = iteration,
+    feature_set = purrr::accumulate(
+      added_feature,
+      ~ c(.x, .y)
+    ),
+    .groups = "drop"
+  )
 
-write_tsv(best_model_dfs_noNLP,
-          file = paste0("../results/06_stepwise_cox_models_results_",
+best_iter <- results_dfs_noNLP |> 
+  group_by(fold) |> 
+  slice_max(
+    c_index,
+    n = 1,
+    with_ties = FALSE
+  ) |> 
+  select(fold, 
+         iteration)
+
+best_models <- best_iter |> 
+  left_join(feature_paths, by = c("fold", "iteration"))
+
+best_models
+
+final_models_dfs_noNLP <- map(
+  seq_len(nrow(best_models)),
+  function(i) {
+    
+    fold_name <- best_models$fold[i]
+    fold_idx  <- as.integer(gsub("Fold", "", fold_name))
+    selected_features <- best_models$feature_set[[i]]
+    
+    # Split train / test
+    test_idx  <- folds_dfs_noNLP[[fold_idx]]
+    train_idx <- setdiff(seq_len(nrow(data_dfs_noNLP)), 
+                         test_idx)
+    
+    train_data <- data_dfs_noNLP[train_idx, ]
+    test_data  <- data_dfs_noNLP[test_idx, ]
+    
+    # Fit final model
+    formula <- as.formula(paste0(
+      "Surv(years_to_dfs_event, dfs_status) ~ ",
+      paste(selected_features, collapse = " + ")
+    ))
+    
+    fit <- coxph(formula, 
+                 data = train_data)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred
+    
+    predictions <- tibble(
+      fold = fold_name,
+      id = test_data$patient_id,
+      dfs_status = test_data$dfs_status,
+      years_to_dfs_event = test_data$years_to_dfs_event,
+      risk = risk
+    )
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_dfs_event, 
+           test_data$dfs_status) ~ risk
+    )$concordance
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_dfs_event <= t & test_data$dfs_status == 1 ~ 1,
+        test_data$years_to_dfs_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(
+            status_t[keep],
+            risk[keep],
+            quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    metrics <- tibble(
+      fold = fold_name,
+      c_index = c_index,
+      auc_12_months = compute_auc(1),
+      auc_18_months = compute_auc(1.5),
+      auc_24_months = compute_auc(2),
+      auc_36_months = compute_auc(3)
+    )
+    
+    # Store coefficients
+    coefs <- summary(fit)$coefficients
+    coefs <- tibble(
+      fold = fold_name,
+      feature = rownames(coefs),
+      beta = coefs[, "coef"],
+      p_value = coefs[, "Pr(>|z|)"]
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      coefficients = coefs
+    )
+  }
+)
+
+predictions_dfs_noNLP <- map_dfr(final_models_dfs_noNLP, "predictions") |> 
+  mutate(model = "stepwise",
+         outcome = "DFS",
+         features = "all")
+
+predictions_dfs_noNLP
+
+write_tsv(predictions_dfs_noNLP,
+          file = paste0("../results/06_predictions_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+
+metrics_dfs_noNLP <- map_dfr(final_models_dfs_noNLP, "metrics") |> 
+  mutate(model = "stepwise",
+         outcome = "DFS",
+         features = "all")
+
+metrics_dfs_noNLP
+
+write_tsv(metrics_dfs_noNLP,
+          file = paste0("../results/06_results_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+
+coefficients_dfs_noNLP <- map_dfr(final_models_dfs_noNLP, "coefficients") |> 
+  mutate(model = "stepwise",
+         outcome = "DFS",
+         features = "all")
+
+coefficients_dfs_noNLP
+
+write_tsv(coefficients_dfs_noNLP,
+          file = paste0("../results/06_coefs_",
                         as.character(max_iterations),
                         "_max.tsv"),
           append = TRUE)
@@ -560,54 +1500,210 @@ write_tsv(best_model_dfs_noNLP,
 #| echo: true
 #| warning: false
 
-res_dfs_nogenomic <- forward_cox_cv(data = data_dfs_nogenomic,
-                                    time_var = "years_to_dfs_event",
-                                    status_var = "dfs_status",
-                                    folds = folds_dfs_nogenomic)
+results_dfs_nogenomic <- forward_cox_cv(
+  data = data_dfs_nogenomic,
+  time_var = "years_to_dfs_event",
+  status_var = "dfs_status",
+  folds = folds_dfs_nogenomic
+)
 
-write_tsv(x = res_dfs_nogenomic,
-          file = paste0("../results/06_res_per_fold_DFS_nogenomic_",
+restuls_all_iterations_dfs_nogenomic <- results_dfs_nogenomic |> 
+  mutate(
+    model = "stepwise",
+    outcome = "DFS",
+    features = "all"
+  )
+
+restuls_all_iterations_dfs_nogenomic
+
+write_tsv(restuls_all_iterations_dfs_nogenomic,
+          file = paste0("../results/06_res_all_iterations_",
                         as.character(max_iterations),
-                        "_max.tsv"))
+                        "_max.tsv"),
+          append = TRUE)
 
-summary_dfs_nogenomic <- res_dfs_nogenomic |> 
+results_dfs_nogenomic |> 
   group_by(iteration) |> 
-  summarise(mean_c_index = mean(c_index),
-            sd_c_index = sd(c_index),
-            lower_95 = quantile(c_index, 0.025),
-            upper_95 = quantile(c_index, 0.975),
-            .groups = "drop")
-
-summary_dfs_nogenomic |> 
-  ggplot(mapping = aes(x = iteration, 
-                       y = mean_c_index)) +
+  summarise(
+    mean_c_index = mean(c_index),
+    lower_95 = quantile(c_index, 0.025),
+    upper_95 = quantile(c_index, 0.975),
+    .groups = "drop"
+  ) |> 
+  ggplot(aes(x = iteration,
+             y = mean_c_index)) +
   geom_line() +
-  geom_ribbon(aes(ymin = lower_95, 
-                  ymax = upper_95),
-              alpha = 0.2) +
+  geom_ribbon(
+    aes(ymin = lower_95,
+        ymax = upper_95),
+    alpha = 0.2
+  ) +
   labs(
     x = "Number of features included",
     y = "C-index (95% CI)",
     title = "Forward stepwise Cox model (DFS)",
     subtitle = "Feature sets included: no genomic"
-    ) +
-  theme_minimal()
+  ) +
+  theme_bw()
 
 ggsave(paste0("../results/06_C_index_plot_DFS_nogenomic_",
               as.character(max_iterations),
               "_max.png"))
 
-best_model_dfs_nogenomic <- summary_dfs_nogenomic |> 
-  filter(mean_c_index == max(mean_c_index)) |> 
-  mutate(model = "Forward_stepwise_Cox",
-         features = "nogenomic",
-         outcome = "DFS") |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, iteration))
+feature_paths <- results_dfs_nogenomic |> 
+  arrange(fold, 
+          iteration) |> 
+  group_by(fold) |> 
+  summarise(
+    iteration = iteration,
+    feature_set = purrr::accumulate(
+      added_feature,
+      ~ c(.x, .y)
+    ),
+    .groups = "drop"
+  )
 
-write_tsv(best_model_dfs_nogenomic,
-          file = paste0("../results/06_stepwise_cox_models_results_",
+best_iter <- results_dfs_nogenomic |> 
+  group_by(fold) |> 
+  slice_max(
+    c_index,
+    n = 1,
+    with_ties = FALSE
+  ) |> 
+  select(fold, 
+         iteration)
+
+best_models <- best_iter |> 
+  left_join(feature_paths, by = c("fold", "iteration"))
+
+best_models
+
+final_models_dfs_nogenomic <- map(
+  seq_len(nrow(best_models)),
+  function(i) {
+    
+    fold_name <- best_models$fold[i]
+    fold_idx  <- as.integer(gsub("Fold", "", fold_name))
+    selected_features <- best_models$feature_set[[i]]
+    
+    # Split train / test
+    test_idx  <- folds_dfs_nogenomic[[fold_idx]]
+    train_idx <- setdiff(seq_len(nrow(data_dfs_nogenomic)), 
+                         test_idx)
+    
+    train_data <- data_dfs_nogenomic[train_idx, ]
+    test_data  <- data_dfs_nogenomic[test_idx, ]
+    
+    # Fit final model
+    formula <- as.formula(paste0(
+      "Surv(years_to_dfs_event, dfs_status) ~ ",
+      paste(selected_features, collapse = " + ")
+    ))
+    
+    fit <- coxph(formula, 
+                 data = train_data)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred
+    
+    predictions <- tibble(
+      fold = fold_name,
+      id = test_data$patient_id,
+      dfs_status = test_data$dfs_status,
+      years_to_dfs_event = test_data$years_to_dfs_event,
+      risk = risk
+    )
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_dfs_event, 
+           test_data$dfs_status) ~ risk
+    )$concordance
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_dfs_event <= t & test_data$dfs_status == 1 ~ 1,
+        test_data$years_to_dfs_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(
+            status_t[keep],
+            risk[keep],
+            quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    metrics <- tibble(
+      fold = fold_name,
+      c_index = c_index,
+      auc_12_months = compute_auc(1),
+      auc_18_months = compute_auc(1.5),
+      auc_24_months = compute_auc(2),
+      auc_36_months = compute_auc(3)
+    )
+    
+    # Store coefficients
+    coefs <- summary(fit)$coefficients
+    coefs <- tibble(
+      fold = fold_name,
+      feature = rownames(coefs),
+      beta = coefs[, "coef"],
+      p_value = coefs[, "Pr(>|z|)"]
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      coefficients = coefs
+    )
+  }
+)
+
+predictions_dfs_nogenomic <- map_dfr(final_models_dfs_nogenomic, "predictions") |> 
+  mutate(model = "stepwise",
+         outcome = "DFS",
+         features = "all")
+
+predictions_dfs_nogenomic
+
+write_tsv(predictions_dfs_nogenomic,
+          file = paste0("../results/06_predictions_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+
+metrics_dfs_nogenomic <- map_dfr(final_models_dfs_nogenomic, "metrics") |> 
+  mutate(model = "stepwise",
+         outcome = "DFS",
+         features = "all")
+
+metrics_dfs_nogenomic
+
+write_tsv(metrics_dfs_nogenomic,
+          file = paste0("../results/06_results_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+
+coefficients_dfs_nogenomic <- map_dfr(final_models_dfs_nogenomic, "coefficients") |> 
+  mutate(model = "stepwise",
+         outcome = "DFS",
+         features = "all")
+
+coefficients_dfs_nogenomic
+
+write_tsv(coefficients_dfs_nogenomic,
+          file = paste0("../results/06_coefs_",
                         as.character(max_iterations),
                         "_max.tsv"),
           append = TRUE)
@@ -620,54 +1716,210 @@ write_tsv(best_model_dfs_nogenomic,
 #| echo: true
 #| warning: false
 
-res_dfs_noNLPgenomic <- forward_cox_cv(data = data_dfs_noNLPgenomic,
-                                       time_var = "years_to_dfs_event",
-                                       status_var = "dfs_status",
-                                       folds = folds_dfs_noNLPgenomic)
+results_dfs_noNLPgenomic <- forward_cox_cv(
+  data = data_dfs_noNLPgenomic,
+  time_var = "years_to_dfs_event",
+  status_var = "dfs_status",
+  folds = folds_dfs_noNLPgenomic
+)
 
-write_tsv(x = res_dfs_noNLPgenomic,
-          file = paste0("../results/06_res_per_fold_DFS_noNLPgenomic_",
+restuls_all_iterations_dfs_noNLPgenomic <- results_dfs_noNLPgenomic |> 
+  mutate(
+    model = "stepwise",
+    outcome = "DFS",
+    features = "all"
+  )
+
+restuls_all_iterations_dfs_noNLPgenomic
+
+write_tsv(restuls_all_iterations_dfs_noNLPgenomic,
+          file = paste0("../results/06_res_all_iterations_",
                         as.character(max_iterations),
-                        "_max.tsv"))
+                        "_max.tsv"),
+          append = TRUE)
 
-summary_dfs_noNLPgenomic <- res_dfs_noNLPgenomic |> 
+results_dfs_noNLPgenomic |> 
   group_by(iteration) |> 
-  summarise(mean_c_index = mean(c_index),
-            sd_c_index = sd(c_index),
-            lower_95 = quantile(c_index, 0.025),
-            upper_95 = quantile(c_index, 0.975),
-            .groups = "drop")
-
-summary_dfs_noNLPgenomic |> 
-  ggplot(mapping = aes(x = iteration, 
-                       y = mean_c_index)) +
+  summarise(
+    mean_c_index = mean(c_index),
+    lower_95 = quantile(c_index, 0.025),
+    upper_95 = quantile(c_index, 0.975),
+    .groups = "drop"
+  ) |> 
+  ggplot(aes(x = iteration,
+             y = mean_c_index)) +
   geom_line() +
-  geom_ribbon(aes(ymin = lower_95, 
-                  ymax = upper_95),
-              alpha = 0.2) +
+  geom_ribbon(
+    aes(ymin = lower_95,
+        ymax = upper_95),
+    alpha = 0.2
+  ) +
   labs(
     x = "Number of features included",
     y = "C-index (95% CI)",
     title = "Forward stepwise Cox model (DFS)",
     subtitle = "Feature sets included: no NLP or genomic"
-    ) +
-  theme_minimal()
+  ) +
+  theme_bw()
 
 ggsave(paste0("../results/06_C_index_plot_DFS_noNLPgenomic_",
               as.character(max_iterations),
               "_max.png"))
 
-best_model_dfs_noNLPgenomic <- summary_dfs_noNLPgenomic |> 
-  filter(mean_c_index == max(mean_c_index)) |> 
-  mutate(model = "Forward_stepwise_Cox",
-         features = "noNLPgenomic",
-         outcome = "DFS") |> 
-  select(c(model, features, outcome, 
-           mean_c_index, sd_c_index,
-           lower_95, upper_95, iteration))
+feature_paths <- results_dfs_noNLPgenomic |> 
+  arrange(fold, 
+          iteration) |> 
+  group_by(fold) |> 
+  summarise(
+    iteration = iteration,
+    feature_set = purrr::accumulate(
+      added_feature,
+      ~ c(.x, .y)
+    ),
+    .groups = "drop"
+  )
 
-write_tsv(best_model_dfs_noNLPgenomic,
-          file = paste0("../results/06_stepwise_cox_models_results_",
+best_iter <- results_dfs_noNLPgenomic |> 
+  group_by(fold) |> 
+  slice_max(
+    c_index,
+    n = 1,
+    with_ties = FALSE
+  ) |> 
+  select(fold, 
+         iteration)
+
+best_models <- best_iter |> 
+  left_join(feature_paths, by = c("fold", "iteration"))
+
+best_models
+
+final_models_dfs_noNLPgenomic <- map(
+  seq_len(nrow(best_models)),
+  function(i) {
+    
+    fold_name <- best_models$fold[i]
+    fold_idx  <- as.integer(gsub("Fold", "", fold_name))
+    selected_features <- best_models$feature_set[[i]]
+    
+    # Split train / test
+    test_idx  <- folds_dfs_noNLPgenomic[[fold_idx]]
+    train_idx <- setdiff(seq_len(nrow(data_dfs_noNLPgenomic)), 
+                         test_idx)
+    
+    train_data <- data_dfs_noNLPgenomic[train_idx, ]
+    test_data  <- data_dfs_noNLPgenomic[test_idx, ]
+    
+    # Fit final model
+    formula <- as.formula(paste0(
+      "Surv(years_to_dfs_event, dfs_status) ~ ",
+      paste(selected_features, collapse = " + ")
+    ))
+    
+    fit <- coxph(formula, 
+                 data = train_data)
+    
+    # Calculate risk scores
+    pred <- predict(fit, 
+                    newdata = test_data)
+    risk <- -pred
+    
+    predictions <- tibble(
+      fold = fold_name,
+      id = test_data$patient_id,
+      dfs_status = test_data$dfs_status,
+      years_to_dfs_event = test_data$years_to_dfs_event,
+      risk = risk
+    )
+    
+    # Calculate concordance
+    c_index <- concordance(
+      Surv(test_data$years_to_dfs_event, 
+           test_data$dfs_status) ~ risk
+    )$concordance
+    
+    # Calculate time-dependent AUCs
+    compute_auc <- function(t) {
+      status_t <- case_when(
+        test_data$years_to_dfs_event <= t & test_data$dfs_status == 1 ~ 1,
+        test_data$years_to_dfs_event >= t ~ 0,
+        TRUE ~ NA_real_
+      )
+      keep <- !is.na(status_t)
+      if (sum(status_t[keep] == 1) == 0 || sum(status_t[keep] == 0) == 0) {
+        NA_real_
+      } else {
+        as.numeric(
+          roc(
+            status_t[keep],
+            risk[keep],
+            quiet = TRUE)$auc
+        )
+      }
+    }
+    
+    metrics <- tibble(
+      fold = fold_name,
+      c_index = c_index,
+      auc_12_months = compute_auc(1),
+      auc_18_months = compute_auc(1.5),
+      auc_24_months = compute_auc(2),
+      auc_36_months = compute_auc(3)
+    )
+    
+    # Store coefficients
+    coefs <- summary(fit)$coefficients
+    coefs <- tibble(
+      fold = fold_name,
+      feature = rownames(coefs),
+      beta = coefs[, "coef"],
+      p_value = coefs[, "Pr(>|z|)"]
+    )
+    
+    # Return all three tibbles in a list
+    list(
+      predictions = predictions,
+      metrics = metrics,
+      coefficients = coefs
+    )
+  }
+)
+
+predictions_dfs_noNLPgenomic <- map_dfr(final_models_dfs_noNLPgenomic, "predictions") |> 
+  mutate(model = "stepwise",
+         outcome = "DFS",
+         features = "all")
+
+predictions_dfs_noNLPgenomic
+
+write_tsv(predictions_dfs_noNLPgenomic,
+          file = paste0("../results/06_predictions_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+
+metrics_dfs_noNLPgenomic <- map_dfr(final_models_dfs_noNLPgenomic, "metrics") |> 
+  mutate(model = "stepwise",
+         outcome = "DFS",
+         features = "all")
+
+metrics_dfs_noNLPgenomic
+
+write_tsv(metrics_dfs_noNLPgenomic,
+          file = paste0("../results/06_results_",
+                        as.character(max_iterations),
+                        "_max.tsv"),
+          append = TRUE)
+
+coefficients_dfs_noNLPgenomic <- map_dfr(final_models_dfs_noNLPgenomic, "coefficients") |> 
+  mutate(model = "stepwise",
+         outcome = "DFS",
+         features = "all")
+
+coefficients_dfs_noNLPgenomic
+
+write_tsv(coefficients_dfs_noNLPgenomic,
+          file = paste0("../results/06_coefs_",
                         as.character(max_iterations),
                         "_max.tsv"),
           append = TRUE)
