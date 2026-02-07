@@ -50,7 +50,7 @@ data_dfs_noNLPgenomic <- read_tsv(file = "../data/03_data_train_dfs_noNLPgenomic
 #| label: settings
 #| echo: true
 
-max_iterations <- 10
+max_iterations <- 100
 ```
 
 # Set up cross-validation
@@ -427,7 +427,7 @@ restuls_all_iterations_os_noNLP <- results_os_noNLP |>
   mutate(
     model = "stepwise",
     outcome = "OS",
-    features = "all"
+    features = "noNLP"
   )
 
 restuls_all_iterations_os_noNLP
@@ -588,7 +588,7 @@ final_models_os_noNLP <- map(
 predictions_os_noNLP <- map_dfr(final_models_os_noNLP, "predictions") |> 
   mutate(model = "stepwise",
          outcome = "OS",
-         features = "all")
+         features = "noNLP")
 
 predictions_os_noNLP
 
@@ -601,7 +601,7 @@ write_tsv(predictions_os_noNLP,
 metrics_os_noNLP <- map_dfr(final_models_os_noNLP, "metrics") |> 
   mutate(model = "stepwise",
          outcome = "OS",
-         features = "all")
+         features = "noNLP")
 
 metrics_os_noNLP
 
@@ -614,7 +614,7 @@ write_tsv(metrics_os_noNLP,
 coefficients_os_noNLP <- map_dfr(final_models_os_noNLP, "coefficients") |> 
   mutate(model = "stepwise",
          outcome = "OS",
-         features = "all")
+         features = "noNLP")
 
 coefficients_os_noNLP
 
@@ -643,7 +643,7 @@ restuls_all_iterations_os_nogenomic <- results_os_nogenomic |>
   mutate(
     model = "stepwise",
     outcome = "OS",
-    features = "all"
+    features = "nogenomic"
   )
 
 restuls_all_iterations_os_nogenomic
@@ -804,7 +804,7 @@ final_models_os_nogenomic <- map(
 predictions_os_nogenomic <- map_dfr(final_models_os_nogenomic, "predictions") |> 
   mutate(model = "stepwise",
          outcome = "OS",
-         features = "all")
+         features = "nogenomic")
 
 predictions_os_nogenomic
 
@@ -817,7 +817,7 @@ write_tsv(predictions_os_nogenomic,
 metrics_os_nogenomic <- map_dfr(final_models_os_nogenomic, "metrics") |> 
   mutate(model = "stepwise",
          outcome = "OS",
-         features = "all")
+         features = "nogenomic")
 
 metrics_os_nogenomic
 
@@ -830,7 +830,7 @@ write_tsv(metrics_os_nogenomic,
 coefficients_os_nogenomic <- map_dfr(final_models_os_nogenomic, "coefficients") |> 
   mutate(model = "stepwise",
          outcome = "OS",
-         features = "all")
+         features = "nogenomic")
 
 coefficients_os_nogenomic
 
@@ -859,7 +859,7 @@ restuls_all_iterations_os_noNLPgenomic <- results_os_noNLPgenomic |>
   mutate(
     model = "stepwise",
     outcome = "OS",
-    features = "all"
+    features = "noNLPgenomic"
   )
 
 restuls_all_iterations_os_noNLPgenomic
@@ -1020,7 +1020,7 @@ final_models_os_noNLPgenomic <- map(
 predictions_os_noNLPgenomic <- map_dfr(final_models_os_noNLPgenomic, "predictions") |> 
   mutate(model = "stepwise",
          outcome = "OS",
-         features = "all")
+         features = "noNLPgenomic")
 
 predictions_os_noNLPgenomic
 
@@ -1033,7 +1033,7 @@ write_tsv(predictions_os_noNLPgenomic,
 metrics_os_noNLPgenomic <- map_dfr(final_models_os_noNLPgenomic, "metrics") |> 
   mutate(model = "stepwise",
          outcome = "OS",
-         features = "all")
+         features = "noNLPgenomic")
 
 metrics_os_noNLPgenomic
 
@@ -1046,7 +1046,7 @@ write_tsv(metrics_os_noNLPgenomic,
 coefficients_os_noNLPgenomic <- map_dfr(final_models_os_noNLPgenomic, "coefficients") |> 
   mutate(model = "stepwise",
          outcome = "OS",
-         features = "all")
+         features = "noNLPgenomic")
 
 coefficients_os_noNLPgenomic
 
@@ -1058,8 +1058,6 @@ write_tsv(coefficients_os_noNLPgenomic,
 ```
 
 # Predicting DFS
-
-S
 
 ## All features
 
@@ -1295,7 +1293,7 @@ restuls_all_iterations_dfs_noNLP <- results_dfs_noNLP |>
   mutate(
     model = "stepwise",
     outcome = "DFS",
-    features = "all"
+    features = "noNLP"
   )
 
 restuls_all_iterations_dfs_noNLP
@@ -1456,7 +1454,7 @@ final_models_dfs_noNLP <- map(
 predictions_dfs_noNLP <- map_dfr(final_models_dfs_noNLP, "predictions") |> 
   mutate(model = "stepwise",
          outcome = "DFS",
-         features = "all")
+         features = "noNLP")
 
 predictions_dfs_noNLP
 
@@ -1469,7 +1467,7 @@ write_tsv(predictions_dfs_noNLP,
 metrics_dfs_noNLP <- map_dfr(final_models_dfs_noNLP, "metrics") |> 
   mutate(model = "stepwise",
          outcome = "DFS",
-         features = "all")
+         features = "noNLP")
 
 metrics_dfs_noNLP
 
@@ -1482,7 +1480,7 @@ write_tsv(metrics_dfs_noNLP,
 coefficients_dfs_noNLP <- map_dfr(final_models_dfs_noNLP, "coefficients") |> 
   mutate(model = "stepwise",
          outcome = "DFS",
-         features = "all")
+         features = "noNLP")
 
 coefficients_dfs_noNLP
 
@@ -1511,7 +1509,7 @@ restuls_all_iterations_dfs_nogenomic <- results_dfs_nogenomic |>
   mutate(
     model = "stepwise",
     outcome = "DFS",
-    features = "all"
+    features = "nogenomic"
   )
 
 restuls_all_iterations_dfs_nogenomic
@@ -1672,7 +1670,7 @@ final_models_dfs_nogenomic <- map(
 predictions_dfs_nogenomic <- map_dfr(final_models_dfs_nogenomic, "predictions") |> 
   mutate(model = "stepwise",
          outcome = "DFS",
-         features = "all")
+         features = "nogenomic")
 
 predictions_dfs_nogenomic
 
@@ -1685,7 +1683,7 @@ write_tsv(predictions_dfs_nogenomic,
 metrics_dfs_nogenomic <- map_dfr(final_models_dfs_nogenomic, "metrics") |> 
   mutate(model = "stepwise",
          outcome = "DFS",
-         features = "all")
+         features = "nogenomic")
 
 metrics_dfs_nogenomic
 
@@ -1698,7 +1696,7 @@ write_tsv(metrics_dfs_nogenomic,
 coefficients_dfs_nogenomic <- map_dfr(final_models_dfs_nogenomic, "coefficients") |> 
   mutate(model = "stepwise",
          outcome = "DFS",
-         features = "all")
+         features = "nogenomic")
 
 coefficients_dfs_nogenomic
 
@@ -1727,7 +1725,7 @@ restuls_all_iterations_dfs_noNLPgenomic <- results_dfs_noNLPgenomic |>
   mutate(
     model = "stepwise",
     outcome = "DFS",
-    features = "all"
+    features = "noNLPgenomic"
   )
 
 restuls_all_iterations_dfs_noNLPgenomic
@@ -1888,7 +1886,7 @@ final_models_dfs_noNLPgenomic <- map(
 predictions_dfs_noNLPgenomic <- map_dfr(final_models_dfs_noNLPgenomic, "predictions") |> 
   mutate(model = "stepwise",
          outcome = "DFS",
-         features = "all")
+         features = "noNLPgenomic")
 
 predictions_dfs_noNLPgenomic
 
@@ -1901,7 +1899,7 @@ write_tsv(predictions_dfs_noNLPgenomic,
 metrics_dfs_noNLPgenomic <- map_dfr(final_models_dfs_noNLPgenomic, "metrics") |> 
   mutate(model = "stepwise",
          outcome = "DFS",
-         features = "all")
+         features = "noNLPgenomic")
 
 metrics_dfs_noNLPgenomic
 
@@ -1914,7 +1912,7 @@ write_tsv(metrics_dfs_noNLPgenomic,
 coefficients_dfs_noNLPgenomic <- map_dfr(final_models_dfs_noNLPgenomic, "coefficients") |> 
   mutate(model = "stepwise",
          outcome = "DFS",
-         features = "all")
+         features = "noNLPgenomic")
 
 coefficients_dfs_noNLPgenomic
 
