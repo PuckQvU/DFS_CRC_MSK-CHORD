@@ -1,0 +1,714 @@
+---
+title: "Model testing"
+subtitle: "Forward stepwise Cox model with clinical data only"
+author: "Puck Quarles van Ufford"
+date: today
+format: html
+---
+
+# Set up
+
+```{r}
+#| label: packages
+#| message: false
+#| echo: true
+
+library("tidyverse")
+library("janitor")
+library("fastDummies")
+library("survival")
+library("survminer")
+```
+
+# Load data
+
+```{r}
+#| label: load_data
+#| message: false
+#| echo: true
+
+data_test <- read_tsv(file = "../data/02_data_test.tsv")
+data_clinical_sample <- read_tsv(file = "../data/01_data_clinical_sample.tsv")
+data_clinical_patient <- read_tsv(file = "../data/01_data_clinical_patient.tsv")
+data_timeline_cea_labs <- read_tsv(file = "../data/01_data_timeline_cea_labs.tsv")
+data_timeline_treatment <- read_tsv(file = "../data/01_data_timeline_treatment.tsv")
+data_timeline_prior_meds <- read_tsv(file = "../data/01_data_timeline_prior_meds.tsv")
+data_timeline_performance_status <- read_tsv(file = "../data/01_data_timeline_performance_status.tsv")
+data_timeline_radiation <- read_tsv(file = "../data/01_data_timeline_radiation.tsv")
+```
+
+# Load results
+
+```{r}
+#| label: load_results
+#| message: false
+#| echo: true
+
+os_map <- readRDS("../results/03_map_ordinal_vars_OS.rds")
+
+dfs_map <- readRDS("../results/03_map_ordinal_vars_DFS.rds")
+
+coefs <- read_tsv(file = "../results/06_coefs_100_max.tsv",
+                  col_names = c("fold",
+                                "feature",
+                                "beta",
+                                "p",
+                                "model",
+                                "outcome",
+                                "feature_set")) 
+```
+
+# Prepare test set
+
+```{r}
+#| label: prepare_data
+#| echo: true
+
+coefs <- coefs |> 
+  filter(feature_set == "noNLPgenomic")
+
+data_clinical_patient <- data_clinical_patient |> 
+  select(-OS_STATUS)
+
+data_timeline_cea_labs <- data_timeline_cea_labs |> 
+  right_join(data_test,
+             by = join_by(PATIENT_ID)) |> 
+  filter(between(START_DATE - SURGERY_DATE, 
+                 -180, 180)) |> 
+  select(- c(STOP_DATE,
+             EVENT_TYPE,
+             LR_UNIT_MEASURE,
+             TEST)) |> 
+  select(- any_of(setdiff(colnames(data_test), "PATIENT_ID"))) |> 
+  rename(DATE_CEA = START_DATE,
+         CEA = RESULT) |> 
+  group_by(PATIENT_ID) |> 
+  arrange(desc(DATE_CEA)) |> 
+  slice(1) |> 
+  ungroup() 
+
+data_timeline_treatment <- data_timeline_treatment |> 
+  inner_join(data_test,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= SURGERY_DATE + 180) |> 
+  select(PATIENT_ID,
+         START_DATE,
+         STOP_DATE,
+         SURGERY_DATE,
+         TREATMENT = SUBTYPE,
+         AGENT) |> 
+  mutate(DAYS_BEFORE_SURGERY = SURGERY_DATE - STOP_DATE) |> 
+  select(- c(AGENT,
+             SURGERY_DATE,
+             START_DATE,
+             STOP_DATE,
+             DAYS_BEFORE_SURGERY)) |> 
+  distinct(PATIENT_ID, TREATMENT, .keep_all = TRUE) |> 
+  mutate(has_treatment = 1) |> 
+  pivot_wider(id_cols = c(PATIENT_ID, everything()),
+              names_from = TREATMENT,
+              values_from = has_treatment,
+              values_fill = 0) 
+
+data_timeline_prior_meds <- data_timeline_prior_meds |> 
+  inner_join(data_test,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= SURGERY_DATE + 180) |> 
+  select(PATIENT_ID,
+         START_DATE,
+         STOP_DATE,
+         SURGERY_DATE,
+         TREATMENT = SUBTYPE) |> 
+  mutate(DAYS_BEFORE_SURGERY = SURGERY_DATE - START_DATE,
+         AGENT = NA) |> 
+  select(- c(AGENT,
+             SURGERY_DATE,
+             START_DATE,
+             STOP_DATE,
+             DAYS_BEFORE_SURGERY)) |> 
+  distinct(PATIENT_ID, TREATMENT, .keep_all = TRUE) |> 
+  mutate(has_treatment = 1) |> 
+  pivot_wider(id_cols = c(PATIENT_ID, everything()),
+              names_from = TREATMENT,
+              values_from = has_treatment,
+              values_fill = 0) 
+
+data_timeline_performance_status <- data_timeline_performance_status |> 
+  right_join(data_test,
+             by = join_by(PATIENT_ID)) |> 
+  filter(between(START_DATE - SURGERY_DATE, 
+                 -180, 180)) |> 
+  select(- c(STOP_DATE,
+             EVENT_TYPE,
+             SUBTYPE,
+             STYLE_COLOR)) |> 
+  select(- any_of(setdiff(colnames(data_test), "PATIENT_ID"))) |> 
+  rename(DATE_ECOG = START_DATE) |> 
+  group_by(PATIENT_ID) |> 
+  arrange(desc(DATE_ECOG)) |> 
+  slice(1) |> 
+  ungroup() 
+
+data_timeline_radiation <- data_timeline_radiation |> 
+  inner_join(data_test,
+             by = join_by(PATIENT_ID)) |> 
+  filter(START_DATE <= SURGERY_DATE + 180) |> 
+  select(PATIENT_ID,
+         START_DATE,
+         STOP_DATE,
+         SURGERY_DATE,
+         TREATMENT = SUBTYPE) |> 
+  mutate(DAYS_BEFORE_SURGERY = SURGERY_DATE - START_DATE, 
+         AGENT = NA) |> 
+  select(- c(AGENT,
+             SURGERY_DATE,
+             START_DATE,
+             STOP_DATE,
+             DAYS_BEFORE_SURGERY)) |> 
+  distinct(PATIENT_ID, TREATMENT, .keep_all = TRUE) |> 
+  mutate(has_treatment = 1) |> 
+  pivot_wider(id_cols = c(PATIENT_ID, everything()),
+              names_from = TREATMENT,
+              values_from = has_treatment,
+              values_fill = 0) 
+```
+
+```{r}
+#| label: prep_test_set
+#| warning: false
+#| echo: true
+
+data_test_encoded <- data_test |>
+  left_join(data_clinical_sample,
+            by = join_by(PATIENT_ID,
+                           SAMPLE_ID)) |> 
+  left_join(data_clinical_patient,
+            by = join_by(PATIENT_ID)) |> 
+  left_join(data_timeline_cea_labs,
+            by = join_by(PATIENT_ID)) |> 
+  left_join(data_timeline_treatment,
+            by = join_by(PATIENT_ID)) |> 
+  left_join(data_timeline_prior_meds,
+            by = join_by(PATIENT_ID)) |> 
+  left_join(data_timeline_performance_status,
+            by = join_by(PATIENT_ID)) |> 
+  left_join(data_timeline_radiation,
+            by = join_by(PATIENT_ID)) |> 
+  mutate(CLINICAL_GROUP_SIMPLIFIED = as.integer(str_sub(CLINICAL_GROUP,
+                                                        1, 1)),
+         RACE_SIMPLIFIED = case_when(RACE == "White" ~ "White",
+                                     RACE == "Black Or African American" ~ "Black",
+                                     RACE == "Asian-Far East/Indian Subcont" ~ "Asian",
+                                     RACE == "Unknown" | RACE == "Pt Refused to Answer" ~ NA,
+                                     TRUE ~ "Other"),
+         ETHNICITY_SIMPLIFIED = case_when(ETHNICITY == "Non-Spanish; Non-Hispanic" ~ "Non-Spanish; Non-Hispanic",
+                                          ETHNICITY == "Unknown whether Spanish or not" ~ NA,
+                                          TRUE ~ "Spanish/Hispanic"),
+         EARLY_ONSET = ifelse(CURRENT_AGE_DEID < 50,
+                              TRUE,
+                              FALSE),
+         LAST_FOLLOW_UP_DATE = round(OS_MONTHS*30.44),
+         AGE_SURGERY = CURRENT_AGE_DEID - round((LAST_FOLLOW_UP_DATE - SURGERY_DATE)/365.25),
+         Investigational_0 = 1,
+         ecog_na = ifelse(is.na(ECOG), 1, 0),
+         tumor_purity_na = ifelse(is.na(TUMOR_PURITY), 1, 0),
+         CEA_na = ifelse(is.na(CEA), 1, 0),
+         GENDER = if_else(GENDER == "Male", 0, 1),
+         EARLY_ONSET = if_else(EARLY_ONSET, 1, 0)) |> 
+  dummy_cols(select_columns = c("CLINICAL_GROUP_SIMPLIFIED",
+                                "Chemo",
+                                "Hormone",
+                                "Biologic",
+                                "Investigational",
+                                "Prior Medications to MSK",
+                                "Radiation Therapy",
+                                "PRIMARY_SITE",
+                                "RACE_SIMPLIFIED",
+                                "ETHNICITY_SIMPLIFIED",
+                                "ONCOTREE_CODE",
+                                "GENE_PANEL",
+                                "MSI_TYPE"),
+             remove_selected_columns = TRUE) |> 
+  clean_names() |> 
+  rename(prior_medications_to_msk_0 = prior_medications_to_msk_na,
+         radiation_therapy_0 = radiation_therapy_na) 
+
+test_features <- data_test_encoded |> 
+  colnames()
+
+setdiff(coefs$feature, test_features)
+summary(names(os_map) %in% coefs$feature)
+summary(names(dfs_map) %in% coefs$feature)
+```
+
+# Evaluate risk scores fold-specific models
+
+```{r}
+#| label: eval_risk_os
+#| echo: true
+
+risk_scores <-  data_test_encoded |> 
+  select(c(patient_id,
+           os_status,
+           years_to_os_event,
+           dfs_status,
+           years_to_dfs_event))
+
+for (o in c("OS", "DFS")) {
+  for (f in 1:5) {
+    
+    selected_coefs <- coefs |> 
+      filter(outcome == o,
+             fold == f)
+    
+    selected_data_test <- data_test_encoded |> 
+      select(all_of(selected_coefs$feature)) 
+    
+    betas <- selected_coefs |> 
+      arrange(match(feature,
+                    colnames(selected_data_test))) |> 
+      pull(beta)
+    
+    test_mat <- selected_data_test |> 
+      as.matrix()
+    
+    test_mat <- sweep(test_mat, 2, betas, `*`)
+    
+    risk_score <- rowSums(test_mat, na.rm = TRUE)
+    
+    colname <- paste0("risk_", o, "_", f)
+    
+    risk_scores[[colname]] <- risk_score
+  }
+}
+
+c_indeces <- tibble(outcome = character(),
+                    risk_score = character(),
+                    c_index = numeric())
+
+for (o in c("os", "dfs")) {
+  scores <- risk_scores |> 
+    select(starts_with(paste0("risk_", o))) |> 
+    colnames()
+  
+  for (score in scores) {
+    
+    formula <- as.formula(
+      paste0("Surv(years_to_", o, "_event, ",
+             o, "_status) ~ ", 
+             score))
+    
+    cox_eval <- coxph(formula, 
+                      data = risk_scores)
+    
+    c_index <- concordance(cox_eval)$concordance
+    c_indeces <- bind_rows(c_indeces,
+                           tibble(outcome = o,
+                                  risk_score = score,
+                                  c_index = c_index))
+  }
+}
+
+write_tsv(c_indeces,
+          file = "../results/10_c_indeces.tsv")
+```
+
+```{r}
+#| label: boxplot_c_indeces
+#| echo: true
+
+c_indeces |> 
+  group_by(outcome) |> 
+  summarise(mean_c = mean(c_index),
+            min_c = min(c_index),
+            max_c = max(c_index))
+
+c_indeces |> 
+  mutate(outcome = factor(outcome,
+                          levels = c("os",
+                                     "dfs"),
+                          labels = c("OS",
+                                     "DFS"))) |> 
+  ggplot(mapping = aes(x = outcome, 
+                       y = c_index)) +
+  geom_boxplot() +
+  labs(title = "Concordance for the test set",
+       y = "C-index",
+       x = NULL) + 
+  theme_bw()
+
+ggsave("../results/10_C_indeces_test.png",
+       width = 4,
+       height = 4)
+```
+
+# Consolidate fold-specific models into final models
+
+```{r}
+#| label: final_model
+#| echo: true
+
+avg_betas <- coefs |> 
+  group_by(outcome, feature) |> 
+  summarise(
+    avg_beta = mean(beta, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+final_os_betas <- avg_betas  |> 
+  filter(outcome == "OS") |> 
+  select(feature, avg_beta)
+
+data_test_os <- as.matrix(data_test_encoded[, final_os_betas$feature])
+final_risk_os <- rowSums(sweep(data_test_os, 2, final_os_betas$avg_beta, `*`),
+                         na.rm = TRUE)
+
+final_dfs_betas <- avg_betas  |> 
+  filter(outcome == "DFS") |> 
+  select(feature, avg_beta)
+
+data_test_dfs <- as.matrix(data_test_encoded[, final_dfs_betas$feature])
+final_risk_dfs <- rowSums(sweep(data_test_dfs, 2, final_dfs_betas$avg_beta, `*`), 
+                          na.rm = TRUE)
+
+risk_scores <- risk_scores |> 
+  mutate(
+    final_risk_os  = final_risk_os,
+    final_risk_dfs = final_risk_dfs
+  )
+
+write_tsv(risk_scores,
+          file = "../results/10_risk_scores.tsv")
+
+cox_os <- coxph(Surv(years_to_os_event, os_status) ~ final_risk_os,
+                data = risk_scores)
+
+summary(cox_os)$concordance
+
+cox_dfs <- coxph(Surv(years_to_dfs_event, dfs_status) ~ final_risk_dfs,
+                 data = risk_scores)
+
+summary(cox_dfs)$concordance
+```
+
+# Correlation of risk scores
+
+```{r}
+#| label: correlation_fold_models
+#| echo: true
+
+os_scores <- risk_scores |> 
+  select(fold_model_1 = risk_OS_1,
+         fold_model_2 = risk_OS_2,
+         fold_model_3 = risk_OS_3,
+         fold_model_4 = risk_OS_4,
+         fold_model_5 = risk_OS_5,
+         final_model = final_risk_os)
+
+cor_os_scores <- cor(os_scores,
+                     use = "pairwise.complete.obs",
+                     method = "spearman")
+
+corr_os_long <- as.data.frame(cor_os_scores) |> 
+  rownames_to_column("score_x") |> 
+  pivot_longer(cols = -score_x,
+               names_to = "score_y",
+               values_to = "correlation") 
+
+corr_os_long |> 
+  ggplot(mapping = aes(x = score_x, 
+                       y = score_y, 
+                       fill = correlation)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(
+    low = "#648FFF",
+    mid = "white",
+    high = "#FE6100",
+    midpoint = 0,
+    limits = c(-1, 1)) +
+  labs(
+    x = NULL,
+    y = NULL,
+    title = "Spearman correlation of predicted risk scores OS") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid = element_blank())
+
+ggsave("../results/10_corr_os.png",
+       width = 6,
+       height = 6)
+
+dfs_scores <- risk_scores |> 
+  select(fold_model_1 = risk_DFS_1,
+         fold_model_2 = risk_DFS_2,
+         fold_model_3 = risk_DFS_3,
+         fold_model_4 = risk_DFS_4,
+         fold_model_5 = risk_DFS_5,
+         final_model = final_risk_dfs)
+
+cor_dfs_scores <- cor(dfs_scores, 
+                      use = "pairwise.complete.obs",
+                      method = "spearman")
+
+corr_dfs_long <- as.data.frame(cor_dfs_scores) |> 
+  rownames_to_column("score_x") |> 
+  pivot_longer(cols = -score_x,
+               names_to = "score_y",
+               values_to = "correlation") 
+
+corr_dfs_long |> 
+  ggplot(mapping = aes(x = score_x, 
+                       y = score_y, 
+                       fill = correlation)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(
+    low = "#648FFF",
+    mid = "white",
+    high = "#FE6100",
+    midpoint = 0,
+    limits = c(-1, 1)) +
+  labs(
+    x = NULL,
+    y = NULL,
+    title = "Spearman correlation of predicted risk scores DFS") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid = element_blank())
+
+ggsave("../results/10_corr_dfs.png",
+       width = 6,
+       height = 6)
+```
+
+# KM plots
+
+```{r}
+#| label: kms
+#| echo: true
+
+risk_scores <- risk_scores |> 
+  mutate(risk_quartile_os = ntile(final_risk_os, 4),
+         risk_quartile_os = factor(
+           risk_quartile_os,
+           levels = 1:4,
+           labels = c("Q1", "Q2", "Q3", "Q4")),
+         risk_quartile_dfs = ntile(final_risk_dfs, 4),
+         risk_quartile_dfs = factor(
+           risk_quartile_dfs,
+           levels = 1:4,
+           labels = c("Q1", "Q2", "Q3", "Q4")))
+
+fit_os <- survfit(Surv(years_to_os_event,
+                       os_status) ~ risk_quartile_os,
+                  data = risk_scores)
+
+ggsurvplot(
+  fit = fit_os,
+  data = risk_scores,
+  title = "Kaplan-Meier plot OS risk score",
+  xlab = "Time (years after surgery)",
+  ylab = "OS probability",
+  xlim = c(0, 5),
+  ylim = c(0, 1),
+  break.x.by = 1,
+  legend = "bottom",
+  risk.table = F,
+  pval = TRUE,
+  pval.method = TRUE,
+  palette = c("#648FFF",
+              "#785EF0",
+              "#DC267F",
+              "#FE6100"),
+  ggtheme = theme_bw()
+)  
+  
+ggsave("../results/10_KM_OS.png",
+       width = 8,
+       height = 4.5)
+
+fit_dfs <- survfit(Surv(years_to_dfs_event,
+                        dfs_status) ~ risk_quartile_dfs,
+                  data = risk_scores)
+
+ggsurvplot(
+  fit = fit_dfs,
+  data = risk_scores,
+  title = "Kaplan-Meier plot DFS risk score",
+  xlab = "Time (years after surgery)",
+  ylab = "DFS probability",
+  xlim = c(0, 5),
+  ylim = c(0, 1),
+  break.x.by = 1,
+  legend = "bottom",
+  risk.table = F,
+  pval = TRUE,
+  pval.method = TRUE,
+  palette = c("#648FFF",
+              "#785EF0",
+              "#DC267F",
+              "#FE6100"),
+  ggtheme = theme_bw()
+)  
+  
+ggsave("../results/10_KM_DFS.png",
+       width = 8,
+       height = 4.5)
+```
+
+Compare against known recurrence risk factors: stage, cancer location and age.
+
+```{r}
+#| label: km_baseline
+#| echo: true
+
+data_baseline_dfs <- data_test |>
+  left_join(data_clinical_sample,
+            by = join_by(PATIENT_ID,
+                           SAMPLE_ID)) |> 
+  left_join(data_clinical_patient,
+            by = join_by(PATIENT_ID)) |> 
+  mutate(stage = as.integer(str_sub(PATHOLOGICAL_GROUP, 1, 1)),
+         stage = ifelse(stage == 0, NA, stage),
+         rectal_cancer = ifelse(PRIMARY_SITE == "Rectum", 1, 0),
+         LAST_FOLLOW_UP_DATE = round(OS_MONTHS*30.44),
+         AGE_SURGERY = CURRENT_AGE_DEID - round((LAST_FOLLOW_UP_DATE - SURGERY_DATE)/365.25),
+         advanced_age = ifelse(AGE_SURGERY > 75, 1, 0)) |> 
+  clean_names()
+
+fit_stage <- survfit(Surv(years_to_dfs_event,
+                          dfs_status) ~ stage,
+                     data = data_baseline_dfs)
+
+ggsurvplot(
+  fit = fit_stage,
+  data = data_baseline_dfs,
+  title = "Kaplan-Meier plot DFS risk UICC stage",
+  xlab = "Time (years after surgery)",
+  ylab = "DFS probability",
+  xlim = c(0, 5),
+  ylim = c(0, 1),
+  break.x.by = 1,
+  legend = "bottom",
+  risk.table = F,
+  pval = TRUE,
+  pval.method = TRUE,
+  palette = c("#648FFF",
+              "#785EF0",
+              "#DC267F",
+              "#FE6100"),
+  ggtheme = theme_bw()
+)  
+  
+ggsave("../results/10_KM_DFS_stage.png",
+       width = 8,
+       height = 4.5)
+
+fit_rectal <- survfit(Surv(years_to_dfs_event,
+                           dfs_status) ~ rectal_cancer,
+                      data = data_baseline_dfs)
+
+ggsurvplot(
+  fit = fit_rectal,
+  data = data_baseline_dfs,
+  title = "Kaplan-Meier plot DFS risk rectal cancer",
+  xlab = "Time (years after surgery)",
+  ylab = "DFS probability",
+  xlim = c(0, 5),
+  ylim = c(0, 1),
+  break.x.by = 1,
+  legend = "bottom",
+  risk.table = F,
+  pval = TRUE,
+  pval.method = TRUE,
+  palette = c("#648FFF",
+              "#FE6100"),
+  ggtheme = theme_bw()
+)  
+  
+ggsave("../results/10_KM_DFS_rectal.png",
+       width = 8,
+       height = 4.5)
+
+fit_age <- survfit(Surv(years_to_dfs_event,
+                        dfs_status) ~ advanced_age,
+                   data = data_baseline_dfs)
+
+ggsurvplot(
+  fit = fit_age,
+  data = data_baseline_dfs,
+  title = "Kaplan-Meier plot DFS risk age > 75",
+  xlab = "Time (years after surgery)",
+  ylab = "DFS probability",
+  xlim = c(0, 5),
+  ylim = c(0, 1),
+  break.x.by = 1,
+  legend = "bottom",
+  risk.table = F,
+  pval = TRUE,
+  pval.method = TRUE,
+  palette = c("#648FFF",
+              "#FE6100"),
+  ggtheme = theme_bw()
+)  
+  
+ggsave("../results/10_KM_DFS_age.png",
+       width = 8,
+       height = 4.5)
+```
+
+# Distribution final risk scores
+
+```{r}
+#| label: risk_score_distribution
+#| echo: true
+
+risk_scores |> 
+  ggplot(mapping = aes(x = final_risk_os,
+                       groups = risk_quartile_os,
+                       color = risk_quartile_os,
+                       fill = risk_quartile_os)) + 
+  geom_density(alpha = 0.2) + 
+  labs(title = "Distribution OS risk scores",
+       x = "OS risk score",
+       y = "Denisty") +
+  theme_bw() +
+  theme(legend.position = "none")  +
+  scale_color_manual(values = c("#648FFF",
+                                "#785EF0",
+                                "#DC267F",
+                                "#FE6100")) +
+  scale_fill_manual(values = c("#648FFF",
+                               "#785EF0",
+                               "#DC267F",
+                               "#FE6100"))
+
+ggsave("../results/10_dist_risk_os.png",
+       width = 4,
+       height = 4)
+
+risk_scores |> 
+  ggplot(mapping = aes(x = final_risk_dfs,
+                       groups = risk_quartile_dfs,
+                       color = risk_quartile_dfs,
+                       fill = risk_quartile_dfs)) + 
+  geom_density(alpha = 0.2) + 
+  labs(title = "Distribution DFS risk scores",
+       x = "DFS risk score",
+       y = "Denisty") +
+  theme_bw() +
+  theme(legend.position = "none")  +
+  scale_color_manual(values = c("#648FFF",
+                                "#785EF0",
+                                "#DC267F",
+                                "#FE6100")) +
+  scale_fill_manual(values = c("#648FFF",
+                               "#785EF0",
+                               "#DC267F",
+                               "#FE6100"))
+
+ggsave("../results/10_dist_risk_dfs.png",
+       width = 4,
+       height = 4)
+```

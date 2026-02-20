@@ -13,6 +13,28 @@ format: html
 #| echo: true
 
 library("tidyverse")
+library("ggpubr")
+```
+
+```{r}
+#| label: colors
+#| echo: true
+
+IBM_colors <- c("#648FFF",
+                "#785EF0",
+                "#DC267F",
+                "#FE6100",
+                "#FFB000")
+```
+
+```{r}
+#| label: colnames
+#| echo: true
+
+result_cols <- c("fold", "c_index",
+                 "auc_12_months", "auc_18_months",
+                 "auc_24_months", "auc_36_months",
+                 "model", "outcome", "feature_set")
 ```
 
 # Load results
@@ -22,219 +44,819 @@ library("tidyverse")
 #| message: false
 #| echo: true
 
-results_cox <- read_tsv("../results/05_cox_models_results.tsv", 
-                        col_names = c("model", "features", "outcome",
-                                      "mean_c_index", "sd_c_index",
-                                      "lower_95", "upper_95",
-                                      "method"))
+res_cox <- read_tsv("../results/05_cox_results.tsv",
+                    col_names = result_cols)
 
-results_stepwise_cox_100 <- read_tsv("../results/06_stepwise_cox_models_results_100_max.tsv",
-                                     col_names = c("model", "features", "outcome",
-                                                   "mean_c_index", "sd_c_index",
-                                                   "lower_95", "upper_95",
-                                                   "n_features"))
+res_stepwise_cox <- read_tsv("../results/06_results_100_max.tsv",
+                             col_names = result_cols)
 
-results_stepwise_cox_50 <- read_tsv("../results/06_stepwise_cox_models_results_50_max.tsv",
-                                    col_names = c("model", "features", "outcome",
-                                                  "mean_c_index", "sd_c_index",
-                                                  "lower_95", "upper_95",
-                                                  "n_features"))
-
-results_stepwise_cox_25 <- read_tsv("../results/06_stepwise_cox_models_results_25_max.tsv",
-                                    col_names = c("model", "features", "outcome",
-                                                  "mean_c_index", "sd_c_index",
-                                                  "lower_95", "upper_95",
-                                                  "n_features"))
-
-results_rsf <- read_tsv("../results/07_rsf_models_results.tsv", 
-                        col_names = c("model", "features", "outcome",
-                                      "mean_c_index", "sd_c_index", 
-                                      "lower_95", "upper_95", 
-                                      "split_rule"))
+res_rsf <- read_tsv("../results/07_rsf_results.tsv",
+                    col_names = result_cols)
 ```
 
-Combine Cox results.
+Combine results.
 
 ```{r}
-#| label: combine_cox_results
+#| label: combine_results
 #| message: false
 #| echo: true
 
-results_all_cox <- results_stepwise_cox_100 |> 
-  mutate(method = "forward-stepwise") |> 
-  bind_rows(results_cox)
+res_stepwise_cox <- res_stepwise_cox |> 
+  mutate(fold = paste0("Fold", fold))
+
+res_all <- res_cox |> 
+  bind_rows(res_stepwise_cox) |> 
+  bind_rows(res_rsf) |> 
+  mutate(model = factor(model,
+                        levels = c("classic",
+                                   "lasso",
+                                   "elastic-net",
+                                   "stepwise",
+                                   "RSF"),
+                        labels = c("Classic Cox",
+                                   "LASSO Cox",
+                                   "Elastic-Net Cox",
+                                   "Forward Stepwise Cox", 
+                                   "RSF")),
+         feature_set = factor(feature_set,
+                              levels = c("noNLPgenomic",
+                                         "noNLP",
+                                         "nogenomic",
+                                         "all"),
+                              labels = c("Clin",
+                                         "Clin + Gen",
+                                         "Clin + NLP",
+                                         "Clin + Gen + NLP")))
+
 ```
 
-# Summarize results
+# Compare concordance
 
-Compare C-indeces across different Cox models.
+Summarize concordance results.
 
 ```{r}
-#| label: cox_c_indeces
+#| label: c_index_summary
 #| message: false
 #| echo: true
 
-results_all_cox |> 
-  mutate(outcome = factor(outcome, 
-                          levels = c("OS", 
-                                     "DFS"))) |> 
-  ggplot(mapping = aes(x = features,
+c_index_summary <- res_all |> 
+  group_by(outcome,
+           model,
+           feature_set) |> 
+  summarise(mean_c_index = mean(c_index),
+            upper_95 = quantile(c_index, 0.025),
+            lower_95 = quantile(c_index, 0.975))
+
+c_index_summary |> 
+  filter(outcome == "OS") |> 
+  ggplot(mapping = aes(x = feature_set,
                        y = mean_c_index,
-                       color = method)) +
+                       color = model)) +
   geom_point(position = position_dodge(width = 0.5)) +
-  geom_errorbar(aes(ymin = lower_95, 
+  geom_errorbar(aes(ymin = lower_95,
                     ymax = upper_95),
                 width = 0.2,
                 alpha = 0.5,
                 position = position_dodge(width = 0.5)) +
-  labs(x = "Types of features included",
-       y = "C-index (95% CI)",
-       title = "Concordance of Cox models",
-       color = "Feature selection method") +
-  theme_minimal() +
-  theme(legend.position = "bottom") +
-  guides(color = guide_legend(nrow = 2)) + 
-  ylim(0.3, 1) +
-  facet_wrap(~ outcome, 
-             nrow = 2)
-  
-ggsave("../results/08_C_indeces_cox.png",
-       width = 6.5,
-       height = 8,
-       units = "in")
-```
+  ylim(0.35, 1) +
+  labs(title = "Concordance OS",
+       y = "mean C-index (95% CI)") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank())  +
+  scale_color_manual(values = IBM_colors) 
 
-Compare C-indeces across different RSF models.
+ggsave("../results/08_C_indeces_OS.png",
+       width = 4,
+       height = 4)
 
-```{r}
-#| label: rsf_c_indeces
-#| message: false
-#| echo: true
-
-results_rsf |> 
-  mutate(outcome = factor(outcome, 
-                          levels = c("OS", 
-                                     "DFS")),
-         split_rule = factor(split_rule, 
-                             levels = c("logrank", 
-                                        "logrankscore", 
-                                        "bs.gradient"))) |> 
-  ggplot(mapping = aes(x = features,
+c_index_summary |> 
+  filter(outcome == "DFS") |> 
+  ggplot(mapping = aes(x = feature_set,
                        y = mean_c_index,
-                       color = split_rule)) +
+                       color = model)) +
   geom_point(position = position_dodge(width = 0.5)) +
-  geom_errorbar(aes(ymin = lower_95, 
+  geom_errorbar(aes(ymin = lower_95,
                     ymax = upper_95),
                 width = 0.2,
                 alpha = 0.5,
                 position = position_dodge(width = 0.5)) +
-  labs(x = "Types of features included",
-       y = "C-index (95% CI)",
-       title = "Concordance of RSF models",
-       color = "Tree splitting rule") +
-  theme_minimal() +
-  theme(legend.position = "bottom") +
-  guides(color = guide_legend(nrow = 2)) +
-  ylim(0.3, 1) +
-  facet_wrap(~ outcome, 
-             nrow = 2)
-  
-ggsave("../results/08_C_indeces_rsf.png",
-       width = 6.5,
-       height = 8,
-       units = "in")
+  ylim(0.35, 1) +
+  labs(title = "Concordance DFS",
+       y = "mean C-index (95% CI)") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank())  +
+  scale_color_manual(values = IBM_colors) 
+
+ggsave("../results/08_C_indeces_DFS.png",
+       width = 4,
+       height = 4)
 ```
 
-# Compare forward Cox 
+## C-index across models
 
 ```{r}
-#| label: compare_forward_cox_max_iterations
+#| label: c_index_model_comparison
 #| message: false
+#| warning: false
 #| echo: true
 
-results_stepwise_cox_compared <- results_stepwise_cox_50 |> 
-  mutate(max_iterations = "50") 
+model_comparisons <- list(c("Classic Cox", 
+                            "Forward Stepwise Cox"))
 
-results_stepwise_cox_compared <- results_stepwise_cox_25 |> 
-  mutate(max_iterations = "25") |> 
-  bind_rows(results_stepwise_cox_compared)
-
-results_stepwise_cox_compared <- results_stepwise_cox_100 |> 
-  mutate(max_iterations = "100") |> 
-  bind_rows(results_stepwise_cox_compared)
-
-results_stepwise_cox_compared |> 
-  mutate(outcome = factor(outcome, 
-                          levels = c("OS", 
-                                     "DFS")),
-         max_iterations = factor(max_iterations, 
-                                 levels = c("25", 
-                                            "50",
-                                            "100"))) |> 
-  ggplot(mapping = aes(x = features,
-                       y = mean_c_index,
-                       color = max_iterations)) +
+res_all |> 
+  filter(outcome == "OS") |> 
+  ggplot(mapping = aes(x = model,
+                       y = c_index,
+                       color = feature_set,
+                       fill = feature_set)) +
   geom_point(position = position_dodge(width = 0.5)) +
-  geom_errorbar(aes(ymin = lower_95, 
+  stat_summary(fun = mean,
+               geom = "bar",
+               width = 0.5,
+               alpha = 0.4,
+               position = position_dodge(width = 0.5)) +
+  stat_summary(fun.data = mean_se, 
+               geom = "errorbar", 
+               width = 0.2,
+               position = position_dodge(width = 0.5)) + 
+  stat_compare_means(comparisons = model_comparisons,
+                     method = "wilcox.test",
+                     label = "p.signif") + 
+  labs(title = "C-index OS",
+       y = "C-index") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, 
+                                   hjust = 1))  +
+  scale_color_manual(values = IBM_colors) +
+  scale_fill_manual(values = IBM_colors) +
+  coord_cartesian(ylim = c(0.3, 1))
+
+ggsave("../results/08_C_indeces_OS_model_comparison.png",
+       width = 4,
+       height = 4)
+
+res_all |> 
+  filter(outcome == "OS") |> 
+  ggplot(mapping = aes(x = model,
+                       y = c_index,
+                       color = feature_set,
+                       fill = feature_set)) +
+  geom_boxplot(position = position_dodge(width = 0.5),
+               alpha = 0.5,
+               width = 0.4) +
+  stat_compare_means(comparisons = model_comparisons,
+                     method = "wilcox.test",
+                     label = "p.signif") + 
+  labs(title = "C-index OS",
+       y = "C-index") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, 
+                                   hjust = 1))  +
+  scale_color_manual(values = IBM_colors) +
+  scale_fill_manual(values = IBM_colors) +
+  coord_cartesian(ylim = c(0.35, 0.9))
+
+ggsave("../results/08_C_indeces_OS_model_comparison_box.png",
+       width = 4,
+       height = 4)
+
+res_all |> 
+  filter(outcome == "DFS") |> 
+  ggplot(mapping = aes(x = model,
+                       y = c_index,
+                       color = feature_set,
+                       fill = feature_set)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  stat_summary(fun = mean,
+               geom = "bar",
+               width = 0.5,
+               alpha = 0.4,
+               position = position_dodge(width = 0.5)) +
+  stat_summary(fun.data = mean_se, 
+               geom = "errorbar", 
+               width = 0.2,
+               position = position_dodge(width = 0.5)) + 
+  stat_compare_means(comparisons = model_comparisons,
+                     method = "wilcox.test",
+                     label = "p.signif") + 
+  labs(title = "C-index DFS",
+       y = "C-index") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, 
+                                   hjust = 1))  +
+  scale_color_manual(values = IBM_colors) +
+  scale_fill_manual(values = IBM_colors) +
+  coord_cartesian(ylim = c(0.3, 1))
+
+ggsave("../results/08_C_indeces_DFS_model_comparison.png",
+       width = 4,
+       height = 4)
+
+res_all |> 
+  filter(outcome == "DFS") |> 
+  ggplot(mapping = aes(x = model,
+                       y = c_index,
+                       color = feature_set,
+                       fill = feature_set)) +
+  geom_boxplot(position = position_dodge(width = 0.5),
+               alpha = 0.5,
+               width = 0.4) +
+  stat_compare_means(comparisons = model_comparisons,
+                     method = "wilcox.test",
+                     label = "p.signif") + 
+  labs(title = "C-index DFS",
+       y = "C-index") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, 
+                                   hjust = 1))  +
+  scale_color_manual(values = IBM_colors) +
+  scale_fill_manual(values = IBM_colors) +
+  coord_cartesian(ylim = c(0.35, 0.9))
+
+ggsave("../results/08_C_indeces_DFS_model_comparison_box.png",
+       width = 4,
+       height = 4)
+```
+
+## C-index across feature sets
+
+```{r}
+#| label: c_index_feature_set_comparison
+#| message: false
+#| warning: false
+#| echo: true
+
+fs_comparisons <- list(c("Clin", "Clin + Gen"),
+                       c("Clin", "Clin + NLP"),
+                       c("Clin", "Clin + Gen + NLP"))
+
+res_all |> 
+  filter(outcome == "OS") |> 
+  ggplot(mapping = aes(x = feature_set,
+                       y = c_index,
+                       color = model,
+                       fill = model)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  stat_summary(fun = mean,
+               geom = "bar",
+               width = 0.5,
+               alpha = 0.4,
+               position = position_dodge(width = 0.5)) +
+  stat_summary(fun.data = mean_se, 
+               geom = "errorbar", 
+               width = 0.2,
+               position = position_dodge(width = 0.5)) + 
+  stat_compare_means(comparisons = fs_comparisons,
+                     method = "wilcox.test",
+                     label = "p.signif") + 
+  labs(title = "C-index OS",
+       y = "C-index") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank())  +
+  scale_color_manual(values = IBM_colors) +
+  scale_fill_manual(values = IBM_colors) +
+  coord_cartesian(ylim = c(0.3, 1))
+
+
+ggsave("../results/08_C_indeces_OS_fs_comparison.png",
+       width = 4,
+       height = 4)
+
+res_all |> 
+  filter(outcome == "DFS") |> 
+  ggplot(mapping = aes(x = feature_set,
+                       y = c_index,
+                       color = model,
+                       fill = model)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  stat_summary(fun = mean,
+               geom = "bar",
+               width = 0.5,
+               alpha = 0.4,
+               position = position_dodge(width = 0.5)) +
+  stat_summary(fun.data = mean_se, 
+               geom = "errorbar", 
+               width = 0.2,
+               position = position_dodge(width = 0.5)) + 
+  stat_compare_means(comparisons = fs_comparisons,
+                     method = "wilcox.test",
+                     label = "p.signif") + 
+  labs(title = "C-index DFS",
+       y = "C-index") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank())  +
+  scale_color_manual(values = IBM_colors) +
+  scale_fill_manual(values = IBM_colors) +
+  coord_cartesian(ylim = c(0.3, 1))
+
+
+ggsave("../results/08_C_indeces_DFS_fs_comparison.png",
+       width = 4,
+       height = 4)
+
+delta_c_os <- res_all |> 
+  filter(feature_set != "Clin",
+         outcome == "OS") |> 
+  left_join(res_all |> 
+              filter(feature_set == "Clin",
+                     outcome == "OS") |> 
+              select(fold,
+                     model, 
+                     c_index_clin = c_index),
+            by = c("fold", 
+                   "model")) |> 
+  mutate(delta_c_index = c_index - c_index_clin)
+
+delta_c_os |> 
+  group_by(model, feature_set) |> 
+  summarise(mean_delta = mean(delta_c_index),
+            lower = quantile(delta_c_index, 0.025),
+            upper = quantile(delta_c_index, 0.975),
+            .groups = "drop") |> 
+  ggplot(mapping = aes(x = mean_delta, 
+                       y = feature_set, 
+                       color = model)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbarh(aes(xmin = lower, 
+                     xmax = upper), 
+                 height = 0.2,
+                 position = position_dodge(width = 0.5)) +
+  geom_vline(xintercept = 0, 
+             linetype = "dashed") +
+  labs(title = "Feature sets contribution OS",
+       x = "Δ C-index v. Clin",
+       y = NULL) +
+  theme_bw() + 
+  theme(legend.position = "none") + 
+  scale_color_manual(values = IBM_colors)
+
+ggsave("../results/08_forest_c_index_os.png",
+       width = 4,
+       height = 4)
+
+delta_c_dfs <- res_all |> 
+  filter(feature_set != "Clin",
+         outcome == "DFS") |> 
+  left_join(res_all |> 
+              filter(feature_set == "Clin",
+                     outcome == "DFS") |> 
+              select(fold,
+                     model, 
+                     c_index_clin = c_index),
+            by = c("fold", 
+                   "model")) |> 
+  mutate(delta_c_index = c_index - c_index_clin)
+
+delta_c_dfs |> 
+  group_by(model, feature_set) |> 
+  summarise(mean_delta = mean(delta_c_index),
+            lower = quantile(delta_c_index, 0.025),
+            upper = quantile(delta_c_index, 0.975),
+            .groups = "drop") |> 
+  ggplot(mapping = aes(x = mean_delta, 
+                       y = feature_set, 
+                       color = model)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbarh(aes(xmin = lower, 
+                     xmax = upper), 
+                 height = 0.2,
+                 position = position_dodge(width = 0.5)) +
+  geom_vline(xintercept = 0, 
+             linetype = "dashed") +
+  labs(title = "Feature sets contribution DFS",
+       x = "Δ C-index v. Clin",
+       y = NULL) +
+  theme_bw() + 
+  theme(legend.position = "none") + 
+  scale_color_manual(values = IBM_colors)
+
+ggsave("../results/08_forest_c_index_dfs.png",
+       width = 4,
+       height = 4)
+```
+
+## C-index across feature sets for best model
+
+```{r}
+#| label: c_index_comparison_stepwise
+#| message: false
+#| warning: false
+#| echo: true
+
+fs_comparisons <- list( c("Clin", "Clin + Gen"),
+                        c("Clin", "Clin + NLP"),
+                        c("Clin", "Clin + Gen + NLP"))
+
+res_all |> 
+  filter(outcome == "OS",
+         model == "Forward Stepwise Cox") |> 
+  ggplot(mapping = aes(x = feature_set,
+                       y = c_index,
+                       color = feature_set,
+                       fill = feature_set)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  stat_summary(fun = mean,
+               geom = "bar",
+               width = 0.5,
+               alpha = 0.4,
+               position = position_dodge(width = 0.5)) +
+  stat_summary(fun.data = mean_se, 
+               geom = "errorbar", 
+               width = 0.2,
+               position = position_dodge(width = 0.5)) + 
+  stat_compare_means(comparisons = fs_comparisons,
+                     method = "wilcox.test",
+                     label = "p.signif") + 
+  labs(title = "C-index OS",
+       subtitle = "Model: Forward Stepwise Cox",
+       y = "C-index") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, 
+                                   hjust = 1))  +
+  scale_color_manual(values = IBM_colors) +
+  scale_fill_manual(values = IBM_colors) +
+  coord_cartesian(ylim = c(0.3, 1))
+
+
+ggsave("../results/08_C_indeces_OS_fs_comparison_stepwise.png",
+       width = 4,
+       height = 4)
+
+res_all |> 
+  filter(outcome == "DFS",
+         model == "Forward Stepwise Cox") |> 
+  ggplot(mapping = aes(x = feature_set,
+                       y = c_index,
+                       color = feature_set,
+                       fill = feature_set)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  stat_summary(fun = mean,
+               geom = "bar",
+               width = 0.5,
+               alpha = 0.4,
+               position = position_dodge(width = 0.5)) +
+  stat_summary(fun.data = mean_se, 
+               geom = "errorbar", 
+               width = 0.2,
+               position = position_dodge(width = 0.5)) + 
+  stat_compare_means(comparisons = fs_comparisons,
+                     method = "wilcox.test",
+                     label = "p.signif") + 
+  labs(title = "C-index DFS",
+       subtitle = "Model: Forward Stepwise Cox",
+       y = "C-index") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, 
+                                   hjust = 1))  +
+  scale_color_manual(values = IBM_colors) +
+  scale_fill_manual(values = IBM_colors) +
+  coord_cartesian(ylim = c(0.3, 1))
+
+
+ggsave("../results/08_C_indeces_DFS_fs_comparison_stepwise.png",
+       width = 4,
+       height = 4)
+```
+
+# Compare time-dependent AUC
+
+## AUC 12 months
+
+```{r}
+#| label: 12_month_auc
+#| message: false
+#| warning: false
+#| echo: true
+
+auc_12_summary <- res_all |> 
+  group_by(outcome,
+           model,
+           feature_set) |> 
+  remove_missing() |> 
+  summarise(mean_auc = mean(auc_12_months),
+            upper_95 = quantile(auc_12_months, 0.025),
+            lower_95 = quantile(auc_12_months, 0.975))
+
+auc_12_summary |> 
+  filter(outcome == "OS") |> 
+  ggplot(mapping = aes(x = feature_set,
+                       y = mean_auc,
+                       color = model)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = lower_95,
                     ymax = upper_95),
                 width = 0.2,
                 alpha = 0.5,
                 position = position_dodge(width = 0.5)) +
-  labs(x = "Types of features included",
-       y = "C-index (95% CI)",
-       title = "Comparing concordance of forward stepwise Cox models",
-       color = "Maximum number of iterations") +
-  theme_minimal() +
-  theme(legend.position = "bottom") +
-  facet_wrap(~ outcome, 
-             ncol = 2)
+  ylim(0.35, 1) +
+  labs(title = "12 month AUC OS",
+       y = "mean AUC (95% CI)") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank())  +
+  scale_color_manual(values = IBM_colors) 
 
-ggsave("../results/08_cox_model_iterations.png")
-```
+ggsave("../results/08_AUC_12_OS.png",
+       width = 4,
+       height = 4)
 
-# Compare all models
-
-Only using the logrank splitting rule for RSF, since it is the default and there is no significant difference between the models
-
-```{r}
-#| label: compare_all_methods
-#| message: false
-#| echo: true
-
-all_models <- results_rsf |> 
-  filter(split_rule == "logrank") |> 
-  mutate(label = "RSF")
-
-all_models <- results_all_cox |> 
-  mutate(label = case_when(method == "classic" ~ "Classic Cox",
-                           method == "lasso" ~ "Lasso-regularized Cox",
-                           method == "elastic-net" ~ "Elastic-net-regularized Cox",
-                           method == "prevalence_filter" ~ "Classic Cox on prevalence-filtered features",
-                           method == "forward-stepwise" ~ "Forward stepwise Cox")) |> 
-  bind_rows(all_models)
-
-all_models |> 
-  mutate(outcome = factor(outcome, 
-                          levels = c("OS", 
-                                     "DFS"))) |> 
-  ggplot(mapping = aes(x = features,
-                       y = mean_c_index,
-                       color = label)) +
+auc_12_summary |> 
+  filter(outcome == "DFS") |> 
+  ggplot(mapping = aes(x = feature_set,
+                       y = mean_auc,
+                       color = model)) +
   geom_point(position = position_dodge(width = 0.5)) +
-  geom_errorbar(aes(ymin = lower_95, 
+  geom_errorbar(aes(ymin = lower_95,
                     ymax = upper_95),
                 width = 0.2,
                 alpha = 0.5,
                 position = position_dodge(width = 0.5)) +
-  labs(x = "Types of features included",
-       y = "C-index (95% CI)",
-       title = "Comparing C-index across models",
-       color = "Model") +
-  theme_minimal() +
-  theme(legend.position = "right")  +
-  guides(color = guide_legend(nrow = 6)) +
-  facet_wrap(~ outcome, 
-             nrow = 2)
+  ylim(0.35, 1) +
+  labs(title = "12 month AUC DFS",
+       y = "mean AUC (95% CI)") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank())  +
+  scale_color_manual(values = IBM_colors) 
 
-ggsave("../results/08_C_indeces.png")
+ggsave("../results/08_AUC_12_DFS.png",
+       width = 4,
+       height = 4)
+```
+
+## AUC 18 months
+
+```{r}
+#| label: 18_month_auc
+#| message: false
+#| warning: false
+#| echo: true
+
+auc_18_summary <- res_all |> 
+  group_by(outcome,
+           model,
+           feature_set) |> 
+  remove_missing() |> 
+  summarise(mean_auc = mean(auc_18_months),
+            upper_95 = quantile(auc_18_months, 0.025),
+            lower_95 = quantile(auc_18_months, 0.975))
+
+auc_18_summary |> 
+  filter(outcome == "OS") |> 
+  ggplot(mapping = aes(x = feature_set,
+                       y = mean_auc,
+                       color = model)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = lower_95,
+                    ymax = upper_95),
+                width = 0.2,
+                alpha = 0.5,
+                position = position_dodge(width = 0.5)) +
+  ylim(0.35, 1) +
+  labs(title = "18 month AUC OS",
+       y = "mean AUC (95% CI)") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank())  +
+  scale_color_manual(values = IBM_colors) 
+
+ggsave("../results/08_AUC_18_OS.png",
+       width = 4,
+       height = 4)
+
+auc_18_summary |> 
+  filter(outcome == "DFS") |> 
+  ggplot(mapping = aes(x = feature_set,
+                       y = mean_auc,
+                       color = model)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = lower_95,
+                    ymax = upper_95),
+                width = 0.2,
+                alpha = 0.5,
+                position = position_dodge(width = 0.5)) +
+  ylim(0.35, 1) +
+  labs(title = "18 month AUC DFS",
+       y = "mean AUC (95% CI)") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank())  +
+  scale_color_manual(values = IBM_colors) 
+
+ggsave("../results/08_AUC_18_DFS.png",
+       width = 4,
+       height = 4)
+```
+
+## AUC 24 months
+
+```{r}
+#| label: 24_month_auc
+#| message: false
+#| warning: false
+#| echo: true
+
+auc_24_summary <- res_all |> 
+  group_by(outcome,
+           model,
+           feature_set) |> 
+  remove_missing() |> 
+  summarise(mean_auc = mean(auc_24_months),
+            upper_95 = quantile(auc_24_months, 0.025),
+            lower_95 = quantile(auc_24_months, 0.975))
+
+auc_24_summary |> 
+  filter(outcome == "OS") |> 
+  ggplot(mapping = aes(x = feature_set,
+                       y = mean_auc,
+                       color = model)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = lower_95,
+                    ymax = upper_95),
+                width = 0.2,
+                alpha = 0.5,
+                position = position_dodge(width = 0.5)) +
+  ylim(0.35, 1) +
+  labs(title = "24 month AUC OS",
+       y = "mean AUC (95% CI)") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank())  +
+  scale_color_manual(values = IBM_colors) 
+
+ggsave("../results/08_AUC_24_OS.png",
+       width = 4,
+       height = 4)
+
+auc_24_summary |> 
+  filter(outcome == "DFS") |> 
+  ggplot(mapping = aes(x = feature_set,
+                       y = mean_auc,
+                       color = model)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = lower_95,
+                    ymax = upper_95),
+                width = 0.2,
+                alpha = 0.5,
+                position = position_dodge(width = 0.5)) +
+  ylim(0.35, 1) +
+  labs(title = "24 month AUC DFS",
+       y = "mean AUC (95% CI)") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank())  +
+  scale_color_manual(values = IBM_colors) 
+
+ggsave("../results/08_AUC_24_DFS.png",
+       width = 4,
+       height = 4)
+```
+
+## AUC 36 months
+
+```{r}
+#| label: 36_month_auc
+#| message: false
+#| warning: false
+#| echo: true
+
+auc_36_summary <- res_all |> 
+  group_by(outcome,
+           model,
+           feature_set) |> 
+  remove_missing() |> 
+  summarise(mean_auc = mean(auc_36_months),
+            upper_95 = quantile(auc_36_months, 0.025),
+            lower_95 = quantile(auc_36_months, 0.975))
+
+auc_36_summary |> 
+  filter(outcome == "OS") |> 
+  ggplot(mapping = aes(x = feature_set,
+                       y = mean_auc,
+                       color = model)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = lower_95,
+                    ymax = upper_95),
+                width = 0.2,
+                alpha = 0.5,
+                position = position_dodge(width = 0.5)) +
+  ylim(0.35, 1) +
+  labs(title = "36 month AUC OS",
+       y = "mean AUC (95% CI)") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank())  +
+  scale_color_manual(values = IBM_colors) 
+
+ggsave("../results/08_AUC_36_OS.png",
+       width = 4,
+       height = 4)
+
+auc_36_summary |> 
+  filter(outcome == "DFS") |> 
+  ggplot(mapping = aes(x = feature_set,
+                       y = mean_auc,
+                       color = model)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = lower_95,
+                    ymax = upper_95),
+                width = 0.2,
+                alpha = 0.5,
+                position = position_dodge(width = 0.5)) +
+  ylim(0.35, 1) +
+  labs(title = "36 month AUC DFS",
+       y = "mean AUC (95% CI)") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank())  +
+  scale_color_manual(values = IBM_colors) 
+
+ggsave("../results/08_AUC_36_DFS.png",
+       width = 4,
+       height = 4)
+```
+
+## AUC across first three years
+
+```{r}
+#| label: all_month_auc
+#| message: false
+#| warning: false
+#| echo: true
+
+auc_summary <- res_all |> 
+  rename("12" = auc_12_months,
+         "24" = auc_24_months,
+         "36" = auc_36_months) |> 
+  pivot_longer(cols = c("12", "24", "36"),
+               names_to = "months",
+               values_to = "auc")
+
+auc_summary |> 
+  filter(outcome == "OS",
+         feature_set == "Clin") |> 
+  ggplot(mapping = aes(x = model,
+                       y = auc,
+                       fill = months,
+                       color = months)) +
+  geom_boxplot(position = position_dodge(width = 0.5),
+               alpha = 0.5,
+               width = 0.4) +
+  ylim(0.35, 1) +
+  labs(title = "Time-dependent AUC OS",
+       subtitle = "Feature set: Clin",
+       y = "AUC") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, 
+                                   hjust = 1))  +
+  scale_color_manual(values = IBM_colors) +
+  scale_fill_manual(values = IBM_colors) 
+
+ggsave("../results/08_AUC_over_time_OS.png",
+       width = 4,
+       height = 4)
+
+auc_summary |> 
+  filter(outcome == "DFS",
+         feature_set == "Clin") |> 
+  ggplot(mapping = aes(x = model,
+                       y = auc,
+                       fill = months,
+                       color = months)) +
+  geom_boxplot(position = position_dodge(width = 0.5),
+               alpha = 0.5,
+               width = 0.4) +
+  ylim(0.35, 1) +
+  labs(title = "Time-dependent AUC DFS",
+       subtitle = "Feature set: Clin",
+       y = "AUC") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, 
+                                   hjust = 1))  +
+  scale_color_manual(values = IBM_colors) +
+  scale_fill_manual(values = IBM_colors) 
+
+ggsave("../results/08_AUC_over_time_DFS.png",
+       width = 4,
+       height = 4)
 ```

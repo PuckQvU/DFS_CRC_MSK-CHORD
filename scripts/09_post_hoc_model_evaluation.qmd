@@ -1,5 +1,6 @@
 ---
 title: "Post-hoc model evaluation"
+subtitle: "Forward stepwise Cox model with clinical data only"
 author: "Puck Quarles van Ufford"
 date: today
 format: html
@@ -13,29 +14,9 @@ format: html
 #| echo: true
 
 library("tidyverse")
-library("ggrepel")
 library("patchwork")
-library("caret")
 library("survival")
-```
-
-```{r}
-#| label: seed
-#| echo: true
-
-set.seed(8)
-```
-
-# Formulas
-
-```{r}
-#| label: feature_inclusion_stepwise_Cox
-#| echo: true
-
-# Calculate Jaccard similarity score
-jaccard <- function(a, b) {
-  length(intersect(a, b)) / length(union(a, b))
-}
+library("survminer")
 ```
 
 # Load data
@@ -46,7 +27,6 @@ jaccard <- function(a, b) {
 #| echo: true
 
 data_os <- read_tsv(file = "../data/03_data_train_os.tsv")
-
 data_dfs <- read_tsv(file = "../data/03_data_train_dfs.tsv")
 ```
 
@@ -57,293 +37,498 @@ data_dfs <- read_tsv(file = "../data/03_data_train_dfs.tsv")
 #| message: false
 #| echo: true
 
-results_stepwise_cox_os_100 <- read_tsv("../results/06_res_per_fold_OS_100_max.tsv")
+risk_scores <- read_tsv(file = "../results/06_predictions_100_max.tsv",
+                        col_names = c("fold",
+                                      "patient_id",
+                                      "status",
+                                      "years_to_event",
+                                      "risk",
+                                      "model",
+                                      "outcome",
+                                      "feature_set"))
 
-results_stepwise_cox_dfs_100 <- read_tsv("../results/06_res_per_fold_DFS_100_max.tsv")
+coefs <- read_tsv(file = "../results/06_coefs_100_max.tsv",
+                  col_names = c("fold",
+                                "feature",
+                                "beta",
+                                "p",
+                                "model",
+                                "outcome",
+                                "feature_set"))
 ```
 
-# Features being selected 
-
-## Forward stepwise Cox models
+# Assess clinical utility of risk scores
 
 ```{r}
-#| label: feature_selection_stepwise_cox_os
-#| message: false
+#| label: utility_risk_os
 #| echo: true
 
-summary_stepwise_cox_os_100 <- results_stepwise_cox_os_100 |> 
-  group_by(added_feature) |> 
-  summarise(times_included = n()/5,
-            when_included = round(mean(iteration))) 
+risk_scores_os <- risk_scores |> 
+  filter(outcome == "OS",
+         feature_set == "noNLPgenomic") |> 
+  mutate(risk = -risk,
+         risk_quartile = ntile(risk, 4),
+         risk_quartile = factor(
+           risk_quartile,
+           levels = 1:4,
+           labels = c("Q1", "Q2", "Q3", "Q4")))
 
-count_times_included <- summary_stepwise_cox_os_100 |> 
-  count(times_included)
+fit_os <- survfit(Surv(years_to_event,
+                       status) ~ risk_quartile,
+                  data = risk_scores_os)
 
-top_10_features_os <- results_stepwise_cox_os_100 |> 
-  filter(iteration <= 10) |> 
-  group_by(fold) |> 
-  summarise(features = list(added_feature),
-            .groups = "drop")
-
-similarity_stepwise_cox_os <- crossing(fold_i = top_10_features_os$fold,
-                                       fold_j = top_10_features_os$fold) |> 
-  filter(fold_i < fold_j) |> 
-  rowwise() |> 
-  mutate(jaccard = jaccard(top_10_features_os$features[[which(top_10_features_os$fold == fold_i)]],
-                           top_10_features_os$features[[which(top_10_features_os$fold == fold_j)]])) |> 
-  ungroup() |> 
-  summarise(mean_jaccard = mean(jaccard),
-            sd_jaccard = sd(jaccard))
-
-summary_stepwise_cox_os_100 |> 
-  ggplot(mapping = aes(x = as_factor(times_included),
-                       y = when_included)) +
-  geom_boxplot(color = "darkgrey") +
-  geom_point(data = \(df) df |> 
-               filter(times_included == 1)) +
-  geom_text_repel(data = \(df) df |> 
-                    filter(times_included == 1),
-                  mapping = aes(label = added_feature),
-                  size = 3,
-                  max.overlaps = Inf) + 
-  geom_text(data = count_times_included,
-            mapping = aes(x = as_factor(times_included),
-                          y = Inf,
-                          label = paste0("n = ", n)),
-            vjust = 1.3,
-            color = "black",
-            size = 3.5,
-            inherit.aes = FALSE) +
-  labs(title = "Feature inclusion in forward stepwise Cox model (OS)",
-       subtitle = paste0("Feature sets included: all (100 max). Jaccard similarity top 10 features: ",
-                         round(similarity_stepwise_cox_os[1], 2),
-                         " (sd ",
-                         round(similarity_stepwise_cox_os[2], 2),
-                         ")"),
-       x = "Fraction of folds that feature was selected",
-       y = "Mean iteration that feature was selected") +
-  theme_minimal()
-
-ggsave("../results/09_feature_selection_plot_stepwise_cox_OS.png")
+ggsurvplot(
+  fit = fit_os,
+  data = risk_scores_os,
+  title = "Kaplan-Meier plot OS risk score",
+  xlab = "Time (years after surgery)",
+  ylab = "OS probability",
+  xlim = c(0, 5),
+  ylim = c(0, 1),
+  break.x.by = 1,
+  legend = "bottom",
+  risk.table = F,
+  pval = TRUE,
+  pval.method = TRUE,
+  palette = c("#648FFF",
+              "#785EF0",
+              "#DC267F",
+              "#FE6100"),
+  ggtheme = theme_bw()
+)  
+  
+ggsave("../results/09_KM_OS.png",
+       width = 8,
+       height = 4.5)
 ```
 
 ```{r}
-#| label: feature_selection_stepwise_cox_dfs
-#| message: false
+#| label: utility_risk_dfs
 #| echo: true
 
-summary_stepwise_cox_dfs_100 <- results_stepwise_cox_dfs_100 |> 
-  group_by(added_feature) |> 
-  summarise(times_included = n()/5,
-            when_included = round(mean(iteration))) 
+risk_scores_dfs <- risk_scores |> 
+  filter(outcome == "DFS",
+         feature_set == "noNLPgenomic") |> 
+  mutate(risk = -risk,
+         risk_quartile = ntile(risk, 4),
+         risk_quartile = factor(
+           risk_quartile,
+           levels = 1:4,
+           labels = c("Q1", "Q2", "Q3", "Q4")))
 
-count_times_included <- summary_stepwise_cox_dfs_100 |> 
-  count(times_included)
+fit_dfs <- survfit(Surv(years_to_event,
+                       status) ~ risk_quartile,
+                  data = risk_scores_dfs)
 
-top_10_features_dfs <- results_stepwise_cox_dfs_100 |> 
-  filter(iteration <= 10) |> 
-  group_by(fold) |> 
-  summarise(features = list(added_feature),
-            .groups = "drop")
-
-similarity_stepwise_cox_dfs <- crossing(fold_i = top_10_features_dfs$fold,
-                                        fold_j = top_10_features_dfs$fold) |> 
-  filter(fold_i < fold_j) |> 
-  rowwise() |> 
-  mutate(jaccard = jaccard(top_10_features_dfs$features[[which(top_10_features_dfs$fold == fold_i)]],
-                           top_10_features_dfs$features[[which(top_10_features_dfs$fold == fold_j)]])) |> 
-  ungroup() |> 
-  summarise(mean_jaccard = mean(jaccard),
-            sd_jaccard = sd(jaccard))
-
-summary_stepwise_cox_dfs_100 |> 
-  ggplot(mapping = aes(x = as_factor(times_included),
-                       y = when_included)) +
-  geom_boxplot(color = "darkgrey") +
-  geom_point(data = \(df) df |> 
-               filter(times_included == 1)) +
-  geom_text_repel(data = \(df) df |> 
-                    filter(times_included == 1),
-                  mapping = aes(label = added_feature),
-                  size = 3,
-                  max.overlaps = Inf) + 
-  geom_text(data = count_times_included,
-            mapping = aes(x = as_factor(times_included),
-                          y = Inf,
-                          label = paste0("n = ", n)),
-            vjust = 1.3,
-            color = "black",
-            size = 3.5,
-            inherit.aes = FALSE) +
-  labs(title = "Feature inclusion in forward stepwise Cox model (DFS)",
-       subtitle = paste0("Feature sets included: all (100 max). Jaccard similarity top 10 features: ",
-                         round(similarity_stepwise_cox_dfs[1], 2),
-                         " (sd ",
-                         round(similarity_stepwise_cox_dfs[2], 2),
-                         ")"),
-       x = "Fraction of folds that feature was selected",
-       y = "Mean iteration that feature was selected") +
-  theme_minimal()
-
-ggsave("../results/09_feature_selection_plot_stepwise_cox_DFS.png")
+ggsurvplot(
+  fit = fit_dfs,
+  data = risk_scores_dfs,
+  title = "Kaplan-Meier plot DFS risk score",
+  xlab = "Time (years after surgery)",
+  ylab = "DFS probability",
+  xlim = c(0, 5),
+  ylim = c(0, 1),
+  break.x.by = 1,
+  legend = "bottom",
+  risk.table = F,
+  pval = TRUE,
+  pval.method = TRUE,
+  palette = c("#648FFF",
+              "#785EF0",
+              "#DC267F",
+              "#FE6100"),
+  ggtheme = theme_bw()
+)  
+  
+ggsave("../results/09_KM_DFS.png",
+       width = 8,
+       height = 4.5)
 ```
 
-# Set up cross-validation
+# Explore feature importance
 
 ```{r}
-#| label: 5_fold_CV
+#| label: features_os
 #| echo: true
 
-folds_os <- createFolds(data_os$os_status,
-                        k = 5,
-                        list = TRUE,
-                        returnTrain = FALSE)
+coefs_os <- coefs |> 
+  filter(outcome == "OS",
+         feature_set == "noNLPgenomic") |> 
+  mutate(se = abs(beta) / qnorm (1 - p/2),
+         hr = exp(beta),
+         hr_lower = exp(beta - 1.96*se),
+         hr_upper = exp(beta + 1-96*se))
 
-folds_dfs <- createFolds(data_dfs$dfs_status,
-                         k = 5,
-                         list = TRUE,
-                         returnTrain = FALSE)
-```
-
-# Check feature importance
-
-```{r}
-#| label: forward_stepwise_Cox_function
-#| echo: true
-
-forward_cox <- function(data,
-                        time_var,
-                        status_var, 
-                        folds, 
-                        top_10) {
-  models <- list()
-
-  outcome_cols <- c(time_var, 
-                    status_var)
-  
-  all_features <- setdiff(colnames(data),
-                          c(outcome_cols, 
-                            "patient_id", 
-                            "sample_id"))
-
-  for (k in seq_along(folds)) {
-
-    test_idx  <- folds[[k]]
-    train_idx <- setdiff(seq_len(nrow(data)),
-                         test_idx)
-
-    data_train <- data[train_idx, ]
-    data_test  <- data[test_idx, ]
-
-    features <- unlist(top_10[k, 2])
-    
-    formula <- as.formula(paste0(
-      "Surv(", time_var, ", ", status_var,  ") ~ ",
-      paste(features,
-            collapse = " + ")))
-    
-    model <- coxph(formula,
-                   data = data_train)
-    
-    models[[length(models) + 1]]  <- model
-  }
-  
-  return(models)
-  }
-```
-
-```{r}
-models_os <- forward_cox(data_os,
-                         "years_to_os_event",
-                         "os_status",
-                         folds_os, 
-                         top_10_features_os)
-
-betas_os <- list()
-
-for(i in seq(1:5)) {
-  model <- unlist(models_os[i])
-  
-  features <- names(model[1:10]) |> 
-    str_remove("^coefficients\\.")
-  
-  betas <- as.numeric(model[1:10])
-  
-  betas_os[[i]] <- tibble(feature = features,
-                        beta = betas,
-                        fold = i)
-  }
-
-betas_os <- bind_rows(betas_os)
-
-betas_os |> 
+coefs_os_summary <- coefs_os |> 
   group_by(feature) |> 
-  summarise(times_selected = n(),
-            mean_beta = mean(beta),
-            lower_95 = quantile(beta, 0.025),
-            upper_95 = quantile(beta, 0.975)) |>
- ggplot(mapping = aes(y = reorder(feature, 
-                                  times_selected),
-                      x = mean_beta,
-                      color = as.character(times_selected))) +
+  summarise(
+    beta_mean = mean(beta),
+    hr = exp(beta_mean),
+    hr_lower = exp(quantile(beta, 0.025)),
+    hr_upper = exp(quantile(beta, 0.975)),
+    abs_log_hr = abs(log(hr)),
+    .groups = "drop"
+  )
+
+top_features_os <- coefs_os_summary |> 
+  slice_max(abs_log_hr,
+            n = 20) |> 
+  arrange(desc(abs_log_hr)) |> 
+  pull(feature)
+
+p1 <- coefs_os_summary |> 
+  filter(feature %in% top_features_os) |> 
+  mutate(feature = case_when(
+    feature == "ethnicity_simplified_spanish_hispanic" ~ "Ethnicity: Spanish/Hispanic",
+    feature == "ethnicity_simplified_non_spanish_non_hispanic" ~ "Ethnicity: not Spanish/Hispanic",
+    feature == "tumor_purity_na" ~ "Missing tumor purity",
+    feature == "oncotree_code_coadread" ~ "Cancer type: COADREAD",
+    feature == "oncotree_code_coad" ~ "Cancer type: COAD",
+    feature == "oncotree_code_read" ~ "Cancer type: READ",
+    feature == "oncotree_code_macr" ~ "Cancer type: MACR",
+    feature == "race_simplified_other" ~ "Race: other",
+    feature == "gene_panel_impact341" ~ "Gene panel: IMPACT341",
+    feature == "investigational_0" ~ "No investigational treatments",
+    feature == "msi_type_indeterminate" ~ "MSI: indeterminate",
+    feature == "race_simplified_asian" ~ "Race: Asian",
+    feature == "primary_site_cecum" ~ "Primary site: cecum",
+    feature == "early_onset" ~ "Early onset",
+    feature == "biologic_0" ~ "No biological treatments",
+    feature == "primary_site_rectum" ~ "Primary site: rectum",
+    feature == "gene_panel_impact410" ~ "Gene panel: IMPACT410",
+    feature == "race_simplified_white" ~ "Race: White",
+    feature == "primary_site_descending_colon" ~ "Primary site: descending colon",
+    feature == "msi_type_stable" ~ "MSI: stable",
+    TRUE ~ feature
+  )) |> 
+  ggplot(mapping = aes(x = hr, 
+                       y = reorder(feature,
+                                   abs_log_hr))) +
   geom_point() +
-  geom_errorbarh(mapping = aes(xmin = lower_95, 
-                               xmax = upper_95)) +
-  theme_minimal() +
-  labs(title = "Betas of top 10 features forward stepwise Cox (OS)",
-       y = NULL,
-       x = "Mean beta (95% CI)",
-       color = "Selected in n folds") +
-  theme(legend.position = "bottom")
+  geom_errorbarh(aes(xmin = hr_lower, 
+                     xmax = hr_upper), 
+                 height = 0.2) +
+  geom_vline(xintercept = 1, 
+             linetype = "dashed") +
+  labs(x = "HR (95% CI)",
+       y = NULL) +
+  theme_bw() + 
+  scale_x_log10()
 
-ggsave("../results/09_beta_top10_plot_stepwise_cox_OS.png")
+selection_freq_os <- coefs_os |> 
+  group_by(feature) |> 
+  summarise(selection_freq = n()) |> 
+  left_join(coefs_os_summary,
+            by = join_by(feature))
 
+p2 <- selection_freq_os |> 
+  filter(feature %in% top_features_os) |> 
+  ggplot(mapping = aes(x = selection_freq, 
+                       y = reorder(feature,
+                                   abs_log_hr))) +
+  geom_col() +
+  labs(x = "Selected in n folds",
+       y = NULL) +
+  theme_bw() +
+  theme(axis.text.y  = element_blank(),
+        axis.ticks.y = element_blank())
+
+p1 + p2 +
+  plot_layout(widths = c(3, 2)) +
+  plot_annotation(
+    title = "Hazard ratio and stability of top 20 clinical predictors OS",
+    theme = theme(
+      plot.title = element_text(hjust = 0.5)))
+
+ggsave("../results/09_features_os.png",
+       width = 8,
+       height = 4)
 ```
 
 ```{r}
-models_dfs <- forward_cox(data_dfs,
-                          "years_to_dfs_event",
-                          "dfs_status",
-                          folds_dfs, 
-                          top_10_features_dfs)
+#| label: features_dfs
+#| echo: true
 
-betas_dfs <- list()
+coefs_dfs <- coefs |> 
+  filter(outcome == "DFS",
+         feature_set == "noNLPgenomic") |> 
+  mutate(se = abs(beta) / qnorm (1 - p/2),
+         hr = exp(beta),
+         hr_lower = exp(beta - 1.96*se),
+         hr_upper = exp(beta + 1-96*se))
 
-for(i in seq(1:5)) {
-  model <- unlist(models_dfs[i])
-  
-  features <- names(model[1:10]) |> 
-    str_remove("^coefficients\\.")
-  
-  betas <- as.numeric(model[1:10])
-  
-  betas_dfs[[i]] <- tibble(feature = features,
-                        beta = betas,
-                        fold = i)
-  }
-
-betas_dfs <- bind_rows(betas_dfs)
-
-betas_dfs |> 
+coefs_dfs_summary <- coefs_dfs |> 
   group_by(feature) |> 
-  summarise(times_selected = n(),
-            mean_beta = mean(beta),
-            lower_95 = quantile(beta, 0.025),
-            upper_95 = quantile(beta, 0.975)) |>
- ggplot(mapping = aes(y = reorder(feature, 
-                                  times_selected),
-                      x = mean_beta,
-                      color = as.character(times_selected))) +
+  summarise(
+    beta_mean = mean(beta),
+    hr = exp(beta_mean),
+    hr_lower = exp(quantile(beta, 0.025)),
+    hr_upper = exp(quantile(beta, 0.975)),
+    abs_log_hr = abs(log(hr)),
+    .groups = "drop"
+  )
+
+top_features_dfs <- coefs_dfs_summary |> 
+  slice_max(abs_log_hr,
+            n = 20) |> 
+  arrange(desc(abs_log_hr)) |> 
+  pull(feature)
+
+p3 <- coefs_dfs_summary |> 
+  filter(feature %in% top_features_dfs) |> 
+    mutate(feature = case_when(
+    feature == "chemo_0" ~ "No chemotherapy",
+    feature == "chemo_1" ~ "Chemotherapy",
+    feature == "investigational_0" ~ "No investigational treatments",
+    feature == "hormone_0" ~ "No hormonal treatments",
+    feature == "race_simplified_asian" ~ "Race: Asian",
+    feature == "primary_site_descending_colon" ~ "Primary site: descending colon",
+    feature == "ethnicity_simplified_spanish_hispanic" ~ "Ethnicity: Spanish/Hispanic",
+    feature == "oncotree_code_read" ~ "Cancer type: READ",
+    feature == "clinical_group_simplified_na" ~ "Missing clinical group",
+    feature == "race_simplified_white" ~ "Race: White",
+    feature == "primary_site_rectum" ~ "Primary site: rectum",
+    feature == "race_simplified_black" ~ "Race: Black",
+    feature == "primary_site_cecum" ~ "Primary site: cecum",
+    feature == "gene_panel_impact341" ~ "Gene panel: IMPACT341",
+    feature == "gene_panel_impact468" ~ "Gene panel: IMPACT468",
+    feature == "biologic_0" ~ "No biological treatments",
+    feature == "cea_na" ~ "Missing CEA",
+    feature == "ethnicity_simplified_non_spanish_non_hispanic" ~ "Ethnicity: not Spanish/Hispanic",
+    feature == "primary_site_sigmoid_colon" ~ "Primary site: sigmoid colon",
+    feature == "gene_panel_impact410" ~ "Gene panel: IMPACT410",
+    TRUE ~ feature
+  )) |> 
+  ggplot(mapping = aes(x = hr, 
+                       y = reorder(feature,
+                                   abs_log_hr))) +
   geom_point() +
-  geom_errorbarh(mapping = aes(xmin = lower_95, 
-                               xmax = upper_95)) +
-  theme_minimal() +
-  labs(title = "Betas of top 10 features forward stepwise Cox (DFS)",
-       y = NULL,
-       x = "Mean beta (95% CI)",
-       color = "Selected in n folds") +
-  theme(legend.position = "bottom")
+  geom_errorbarh(aes(xmin = hr_lower, 
+                     xmax = hr_upper), 
+                 height = 0.2) +
+  geom_vline(xintercept = 1, 
+             linetype = "dashed") +
+  labs(x = "HR (95% CI)",
+       y = NULL) +
+  theme_bw() + 
+  scale_x_log10()
 
-ggsave("../results/09_beta_top10_plot_stepwise_cox_DFS.png")
+selection_freq_dfs <- coefs_dfs |> 
+  group_by(feature) |> 
+  summarise(selection_freq = n()) |> 
+  left_join(coefs_dfs_summary,
+            by = join_by(feature))
 
+p4 <- selection_freq_dfs |> 
+  filter(feature %in% top_features_dfs) |> 
+  ggplot(mapping = aes(x = selection_freq, 
+                       y = reorder(feature,
+                                   abs_log_hr))) +
+  geom_col() +
+  labs(x = "Fraction of folds selected",
+       y = NULL) +
+  theme_bw() +
+  theme(axis.text.y  = element_blank(),
+        axis.ticks.y = element_blank())
+
+p3 + p4 +
+  plot_layout(widths = c(3, 2)) +
+  plot_annotation(
+    title = "Hazard ratio and stability of top 20 clinical predictors DFS",
+    theme = theme(
+      plot.title = element_text(hjust = 0.5)))
+
+ggsave("../results/09_features_dfs.png",
+       width = 8,
+       height = 4)
+```
+
+## Correlation among key features
+
+```{r}
+#| label: correlation_os_features
+#| echo: true
+
+corr_os <- data_os  |> 
+  select(all_of(top_features_os)) |> 
+  drop_na()
+
+corr_os_mat <- cor(corr_os, 
+                    use = "pairwise.complete.obs", 
+                    method = "spearman")
+
+corr_os_long <- as.data.frame(corr_os_mat) |> 
+  rownames_to_column("feature_x") |> 
+  pivot_longer(cols = -feature_x,
+               names_to = "feature_y",
+               values_to = "correlation") 
+
+order <- hclust(dist(1 - corr_os_mat))$order
+ordered_features <- colnames(corr_os_mat)[order]
+
+corr_os_long <- corr_os_long |> 
+  mutate(feature_x = factor(feature_x, levels = ordered_features),
+         feature_y = factor(feature_y, levels = ordered_features),
+         feature_x = case_when(
+           feature_x == "ethnicity_simplified_spanish_hispanic" ~ "Ethnicity: Spanish/Hispanic",
+           feature_x == "ethnicity_simplified_non_spanish_non_hispanic" ~ "Ethnicity: not Spanish/Hispanic",
+           feature_x == "tumor_purity_na" ~ "Missing tumor purity",
+           feature_x == "oncotree_code_coadread" ~ "Cancer type: COADREAD",
+           feature_x == "oncotree_code_coad" ~ "Cancer type: COAD",
+           feature_x == "oncotree_code_read" ~ "Cancer type: READ",
+           feature_x == "oncotree_code_macr" ~ "Cancer type: MACR",
+           feature_x == "race_simplified_other" ~ "Race: other",
+           feature_x == "gene_panel_impact341" ~ "Gene panel: IMPACT341",
+           feature_x == "investigational_0" ~ "No investigational treatments",
+           feature_x == "msi_type_indeterminate" ~ "MSI: indeterminate",
+           feature_x == "race_simplified_asian" ~ "Race: Asian",
+           feature_x == "primary_site_cecum" ~ "Primary site: cecum",
+           feature_x == "early_onset" ~ "Early onset",
+           feature_x == "biologic_0" ~ "No biological treatments",
+           feature_x == "primary_site_rectum" ~ "Primary site: rectum",
+           feature_x == "gene_panel_impact410" ~ "Gene panel: IMPACT410",
+           feature_x == "race_simplified_white" ~ "Race: White",
+           feature_x == "primary_site_descending_colon" ~ "Primary site: descending colon",
+           feature_x == "msi_type_stable" ~ "MSI: stable",
+           TRUE ~ feature_y),
+         feature_y = case_when(
+           feature_y == "ethnicity_simplified_spanish_hispanic" ~ "Ethnicity: Spanish/Hispanic",
+           feature_y == "ethnicity_simplified_non_spanish_non_hispanic" ~ "Ethnicity: not Spanish/Hispanic",
+           feature_y == "tumor_purity_na" ~ "Missing tumor purity",
+           feature_y == "oncotree_code_coadread" ~ "Cancer type: COADREAD",
+           feature_y == "oncotree_code_coad" ~ "Cancer type: COAD",
+           feature_y == "oncotree_code_read" ~ "Cancer type: READ",
+           feature_y == "oncotree_code_macr" ~ "Cancer type: MACR",
+           feature_y == "race_simplified_other" ~ "Race: other",
+           feature_y == "gene_panel_impact341" ~ "Gene panel: IMPACT341",
+           feature_y == "investigational_0" ~ "No investigational treatments",
+           feature_y == "msi_type_indeterminate" ~ "MSI: indeterminate",
+           feature_y == "race_simplified_asian" ~ "Race: Asian",
+           feature_y == "primary_site_cecum" ~ "Primary site: cecum",
+           feature_y == "early_onset" ~ "Early onset",
+           feature_y == "biologic_0" ~ "No biological treatments",
+           feature_y == "primary_site_rectum" ~ "Primary site: rectum",
+           feature_y == "gene_panel_impact410" ~ "Gene panel: IMPACT410",
+           feature_y == "race_simplified_white" ~ "Race: White",
+           feature_y == "primary_site_descending_colon" ~ "Primary site: descending colon",
+           feature_y == "msi_type_stable" ~ "MSI: stable",
+           TRUE ~ feature_y))
+
+corr_os_long |> 
+  ggplot(mapping = aes(x = feature_x, 
+                       y = feature_y, 
+                       fill = correlation)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(
+    low = "#648FFF",
+    mid = "white",
+    high = "#FE6100",
+    midpoint = 0,
+    limits = c(-1, 1)) +
+  labs(
+    x = NULL,
+    y = NULL,
+    title = "Spearman correlation of top 20 clinical predictors OS") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid = element_blank())
+
+ggsave("../results/09_corr_os.png",
+       width = 7,
+       height = 7)
+```
+
+```{r}
+#| label: correlation_dfs_features
+#| echo: true
+
+corr_dfs <- data_dfs  |> 
+  select(all_of(top_features_dfs)) |> 
+  drop_na()
+
+corr_dfs_mat <- cor(corr_dfs, 
+                    use = "pairwise.complete.obs", 
+                    method = "spearman")
+
+corr_dfs_long <- as.data.frame(corr_dfs_mat) |> 
+  rownames_to_column("feature_x") |> 
+  pivot_longer(cols = -feature_x,
+               names_to = "feature_y",
+               values_to = "correlation")
+
+order <- hclust(dist(1 - corr_dfs_mat))$order
+ordered_features <- colnames(corr_dfs_mat)[order]
+
+corr_dfs_long <- corr_dfs_long |> 
+  mutate(feature_x = factor(feature_x, levels = ordered_features),
+         feature_y = factor(feature_y, levels = ordered_features),
+         feature_x = case_when(
+           feature_x == "chemo_0" ~ "No chemotherapy",
+           feature_x == "chemo_1" ~ "Chemotherapy",
+           feature_x == "investigational_0" ~ "No investigational treatments",
+           feature_x == "hormone_0" ~ "No hormonal treatments",
+           feature_x == "race_simplified_asian" ~ "Race: Asian",
+           feature_x == "primary_site_descending_colon" ~ "Primary site: descending colon",
+           feature_x == "ethnicity_simplified_spanish_hispanic" ~ "Ethnicity: Spanish/Hispanic",
+           feature_x == "oncotree_code_read" ~ "Cancer type: READ",
+           feature_x == "clinical_group_simplified_na" ~ "Missing clinical group",
+           feature_x == "race_simplified_white" ~ "Race: White",
+           feature_x == "primary_site_rectum" ~ "Primary site: rectum",
+           feature_x == "race_simplified_black" ~ "Race: Black",
+           feature_x == "primary_site_cecum" ~ "Primary site: cecum",
+           feature_x == "gene_panel_impact341" ~ "Gene panel: IMPACT341",
+           feature_x == "gene_panel_impact468" ~ "Gene panel: IMPACT468",
+           feature_x == "biologic_0" ~ "No biological treatments",
+           feature_x == "cea_na" ~ "Missing CEA",
+           feature_x == "ethnicity_simplified_non_spanish_non_hispanic" ~ "Ethnicity: not Spanish/Hispanic",
+           feature_x == "primary_site_sigmoid_colon" ~ "Primary site: sigmoid colon",
+           feature_x == "gene_panel_impact410" ~ "Gene panel: IMPACT410",
+           TRUE ~ feature_x),
+         feature_y = case_when(
+           feature_y == "chemo_0" ~ "No chemotherapy",
+           feature_y == "chemo_1" ~ "Chemotherapy",
+           feature_y == "investigational_0" ~ "No investigational treatments",
+           feature_y == "hormone_0" ~ "No hormonal treatments",
+           feature_y == "race_simplified_asian" ~ "Race: Asian",
+           feature_y == "primary_site_descending_colon" ~ "Primary site: descending colon",
+           feature_y == "ethnicity_simplified_spanish_hispanic" ~ "Ethnicity: Spanish/Hispanic",
+           feature_y == "oncotree_code_read" ~ "Cancer type: READ",
+           feature_y == "clinical_group_simplified_na" ~ "Missing clinical group",
+           feature_y == "race_simplified_white" ~ "Race: White",
+           feature_y == "primary_site_rectum" ~ "Primary site: rectum",
+           feature_y == "race_simplified_black" ~ "Race: Black",
+           feature_y == "primary_site_cecum" ~ "Primary site: cecum",
+           feature_y == "gene_panel_impact341" ~ "Gene panel: IMPACT341",
+           feature_y == "gene_panel_impact468" ~ "Gene panel: IMPACT468",
+           feature_y == "biologic_0" ~ "No biological treatments",
+           feature_y == "cea_na" ~ "Missing CEA",
+           feature_y == "ethnicity_simplified_non_spanish_non_hispanic" ~ "Ethnicity: not Spanish/Hispanic",
+           feature_y == "primary_site_sigmoid_colon" ~ "Primary site: sigmoid colon",
+           feature_y == "gene_panel_impact410" ~ "Gene panel: IMPACT410",
+           TRUE ~ feature_y))
+
+corr_dfs_long |> 
+  ggplot(mapping = aes(x = feature_x, 
+                       y = feature_y, 
+                       fill = correlation)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(
+    low = "#648FFF",
+    mid = "white",
+    high = "#FE6100",
+    midpoint = 0,
+    limits = c(-1, 1)) +
+  labs(
+    x = NULL,
+    y = NULL,
+    title = "Spearman correlation of top 20 clinical predictors DFS") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid = element_blank())
+
+ggsave("../results/09_corr_dfs.png",
+       width = 7,
+       height = 7)
 ```
