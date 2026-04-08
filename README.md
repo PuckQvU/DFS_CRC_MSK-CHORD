@@ -5,8 +5,9 @@
 This repository contains the code used for the analyses presented in the manuscript:
 
 "Routine Clinical Data Enables Robust Risk Stratification of Disease-Free Survival in Stage I–III Colorectal Cancer"
+
 Quarles van Ufford, P., Fan, B., Olsen, L.R., Gögenur, I., Krauthammer, M., & Lund, O.
-2026
+(2026)
 
 The goal of this repository is to enable reproducibility of the analyses and allow other researchers to apply or extend the methods used in the study.
 
@@ -56,5 +57,7 @@ This repository includes implementations or applications of the following method
 For questions or issues related to this repository, please contact:
 
 Puck Quarles van Ufford
+
 Technical University of Denmark
+
 puqu@dtu.dk
