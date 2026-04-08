@@ -37,7 +37,9 @@ Packages used in this repository:
 
 ## Data Availability
 
-To reproduce the results, first download the MSK CHORD dataset from [cBioPortal](https://www.cbioportal.org/study/summary?id=msk_chord_2024 "cBioPortal: MSK-CHORD") and place it in data/_raw/
+The data used for this project were published as the MSK-CHORD dataset (Jee _et al_, 2024, https://doi.org/10.1038/s41586-024-08167-5).
+
+To reproduce the results, first download the MSK-CHORD dataset from [cBioPortal](https://www.cbioportal.org/study/summary?id=msk_chord_2024 "cBioPortal: MSK-CHORD") and place it in data/_raw/
 
 ## Reproducing the Analysis
 
