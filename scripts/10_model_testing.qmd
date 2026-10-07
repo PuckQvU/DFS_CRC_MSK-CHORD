@@ -333,6 +333,7 @@ c_indeces |>
                        y = c_index)) +
   geom_boxplot() +
   labs(title = "Concordance for the test set",
+       subtitle = "Forward Stepwise Cox Model",
        y = "C-index",
        x = NULL) + 
   theme_bw()
@@ -508,6 +509,7 @@ ggsurvplot(
   fit = fit_os,
   data = risk_scores,
   title = "Kaplan-Meier plot OS risk score",
+  subtitle = "Forward Stepwise Cox",
   xlab = "Time (years after surgery)",
   ylab = "OS probability",
   xlim = c(0, 5),
@@ -536,6 +538,7 @@ ggsurvplot(
   fit = fit_dfs,
   data = risk_scores,
   title = "Kaplan-Meier plot DFS risk score",
+  subtitle = "Forward Stepwise Cox",
   xlab = "Time (years after surgery)",
   ylab = "DFS probability",
   xlim = c(0, 5),
@@ -711,4 +714,248 @@ risk_scores |>
 ggsave("../results/10_dist_risk_dfs.png",
        width = 4,
        height = 4)
+```
+
+# Compare to classic Cox
+
+```{r}
+#| label: load_coefs_classic
+
+coefs_classic <- read_tsv(file = "../results/05_cox_coefs.tsv",
+                  col_names = c("fold",
+                                "feature",
+                                "beta",
+                                "p",
+                                "model",
+                                "outcome",
+                                "feature_set")) |> 
+  filter(feature_set == "noNLPgenomic")
+
+setdiff(coefs_classic$feature, test_features)
+```
+
+```{r}
+#| label: eval_risk_os_classic
+#| warning: false
+
+risk_scores_classic <-  data_test_encoded |> 
+  select(c(patient_id,
+           os_status,
+           years_to_os_event,
+           dfs_status,
+           years_to_dfs_event))
+
+for (o in c("OS", "DFS")) {
+  for (f in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+    
+    selected_coefs <- coefs_classic |> 
+      filter(outcome == o,
+             fold == f)
+    
+    selected_data_test <- data_test_encoded |> 
+      select(all_of(selected_coefs$feature)) 
+    
+    betas <- selected_coefs |> 
+      arrange(match(feature,
+                    colnames(selected_data_test))) |> 
+      pull(beta)
+    
+    test_mat <- selected_data_test |> 
+      as.matrix()
+    
+    test_mat <- sweep(test_mat, 2, betas, `*`)
+    
+    risk_score <- rowSums(test_mat, na.rm = TRUE)
+    
+    colname <- paste0("risk_", o, "_", f)
+    
+    risk_scores_classic[[colname]] <- risk_score
+  }
+}
+
+c_indeces_classic <- tibble(outcome = character(),
+                    risk_score = character(),
+                    c_index = numeric())
+
+for (o in c("os", "dfs")) {
+  scores <- risk_scores_classic |> 
+    select(starts_with(paste0("risk_", o))) |> 
+    colnames()
+  
+  for (score in scores) {
+    
+    formula <- as.formula(
+      paste0("Surv(years_to_", o, "_event, ",
+             o, "_status) ~ ", 
+             score))
+    
+    cox_eval <- coxph(formula, 
+                      data = risk_scores_classic)
+    
+    c_index <- concordance(cox_eval)$concordance
+    c_indeces_classic <- bind_rows(c_indeces_classic,
+                           tibble(outcome = o,
+                                  risk_score = score,
+                                  c_index = c_index))
+  }
+}
+
+write_tsv(c_indeces_classic,
+          file = "../results/10_c_indeces_classic.tsv")
+```
+
+```{r}
+#| label: boxplot_c_indeces_classic
+#| echo: true
+
+c_indeces_classic |> 
+  group_by(outcome) |> 
+  summarise(mean_c = mean(c_index),
+            min_c = min(c_index),
+            max_c = max(c_index))
+
+c_indeces_classic |> 
+  mutate(outcome = factor(outcome,
+                          levels = c("os",
+                                     "dfs"),
+                          labels = c("OS",
+                                     "DFS"))) |> 
+  ggplot(mapping = aes(x = outcome, 
+                       y = c_index)) +
+  geom_boxplot() +
+  labs(title = "Concordance for the test set",
+       subtitle = "Classic Cox Model",
+       y = "C-index",
+       x = NULL) + 
+  theme_bw()
+
+ggsave("../results/10_C_indeces_classic.png",
+       width = 4,
+       height = 4)
+```
+
+## Consolidate fold-specific models into final models
+
+```{r}
+#| label: final_model_classic
+#| echo: true
+
+avg_betas_classic <- coefs_classic |> 
+  group_by(outcome, feature) |> 
+  summarise(
+    avg_beta = mean(beta, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+final_os_betas_classic <- avg_betas_classic  |> 
+  filter(outcome == "OS") |> 
+  select(feature, avg_beta)
+
+data_test_os_classic <- as.matrix(data_test_encoded[, final_os_betas_classic$feature])
+final_risk_os_classic <- rowSums(sweep(data_test_os_classic, 2, final_os_betas_classic$avg_beta, `*`),
+                                 na.rm = TRUE)
+
+final_dfs_betas_classic <- avg_betas_classic  |> 
+  filter(outcome == "DFS") |> 
+  select(feature, avg_beta)
+
+data_test_dfs_classic <- as.matrix(data_test_encoded[, final_dfs_betas_classic$feature])
+final_risk_dfs_classic <- rowSums(sweep(data_test_dfs_classic, 2, final_dfs_betas_classic$avg_beta, `*`), 
+                                  na.rm = TRUE)
+
+risk_scores_classic <- risk_scores_classic |> 
+  mutate(
+    final_risk_os  = final_risk_os_classic,
+    final_risk_dfs = final_risk_dfs_classic
+  )
+
+write_tsv(risk_scores_classic,
+          file = "../results/10_risk_scores_classic.tsv")
+
+cox_os_classic <- coxph(Surv(years_to_os_event, os_status) ~ final_risk_os,
+                        data = risk_scores_classic)
+
+summary(cox_os_classic)$concordance
+
+cox_dfs_classic <- coxph(Surv(years_to_dfs_event, dfs_status) ~ final_risk_dfs,
+                         data = risk_scores_classic)
+
+summary(cox_dfs_classic)$concordance
+```
+
+## KMs
+
+```{r}
+#| label: kms_classic_cox
+#| echo: true
+
+risk_scores_classic <- risk_scores_classic |> 
+  mutate(risk_quartile_os = ntile(final_risk_os, 4),
+         risk_quartile_os = factor(
+           risk_quartile_os,
+           levels = 1:4,
+           labels = c("Q1", "Q2", "Q3", "Q4")),
+         risk_quartile_dfs = ntile(final_risk_dfs, 4),
+         risk_quartile_dfs = factor(
+           risk_quartile_dfs,
+           levels = 1:4,
+           labels = c("Q1", "Q2", "Q3", "Q4")))
+
+fit_os_classic <- survfit(Surv(years_to_os_event,
+                               os_status) ~ risk_quartile_os,
+                          data = risk_scores_classic)
+
+ggsurvplot(
+  fit = fit_os_classic,
+  data = risk_scores_classic,
+  title = "Kaplan-Meier plot OS risk score",
+  subtitle = "Classic Cox",
+  xlab = "Time (years after surgery)",
+  ylab = "OS probability",
+  xlim = c(0, 5),
+  ylim = c(0, 1),
+  break.x.by = 1,
+  legend = "bottom",
+  risk.table = F,
+  pval = TRUE,
+  pval.method = TRUE,
+  palette = c("#648FFF",
+              "#785EF0",
+              "#DC267F",
+              "#FE6100"),
+  ggtheme = theme_bw()
+)  
+  
+ggsave("../results/10_KM_OS_classic.png",
+       width = 8,
+       height = 4.5)
+
+fit_dfs_classic <- survfit(Surv(years_to_dfs_event,
+                                dfs_status) ~ risk_quartile_dfs,
+                           data = risk_scores_classic)
+
+ggsurvplot(
+  fit = fit_dfs_classic,
+  data = risk_scores_classic,
+  title = "Kaplan-Meier plot DFS risk score",
+  subtitle = "Classic Cox",
+  xlab = "Time (years after surgery)",
+  ylab = "DFS probability",
+  xlim = c(0, 5),
+  ylim = c(0, 1),
+  break.x.by = 1,
+  legend = "bottom",
+  risk.table = F,
+  pval = TRUE,
+  pval.method = TRUE,
+  palette = c("#648FFF",
+              "#785EF0",
+              "#DC267F",
+              "#FE6100"),
+  ggtheme = theme_bw()
+)  
+  
+ggsave("../results/10_KM_DFS_classic.png",
+       width = 8,
+       height = 4.5)
 ```
