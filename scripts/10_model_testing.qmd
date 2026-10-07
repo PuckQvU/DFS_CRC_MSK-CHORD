@@ -48,7 +48,7 @@ os_map <- readRDS("../results/03_map_ordinal_vars_OS.rds")
 
 dfs_map <- readRDS("../results/03_map_ordinal_vars_DFS.rds")
 
-coefs <- read_tsv(file = "../results/06_coefs_100_max.tsv",
+coefs <- read_tsv(file = "../results/06_coefs_50_max.tsv",
                   col_names = c("fold",
                                 "feature",
                                 "beta",

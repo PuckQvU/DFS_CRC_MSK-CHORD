@@ -267,19 +267,15 @@ data_survival <- data_survival |>
                                 na.rm = TRUE), 
                            OS_DATE),
          DAYS_TO_OS_EVENT = OS_DATE - SURGERY_DATE,
-         DAYS_TO_DFS_EVENT = DFS_DATE - SURGERY_DATE,
-         YEARS_TO_OS_EVENT = DAYS_TO_OS_EVENT/365.25, 
-         YEARS_TO_DFS_EVENT = DAYS_TO_DFS_EVENT/365.25) |> 
+         DAYS_TO_DFS_EVENT = DFS_DATE - SURGERY_DATE) |> 
   select(PATIENT_ID, 
          SAMPLE_ID,
          SURGERY_DATE,
          SAMPLE_DATE,
          OS_STATUS, 
          DAYS_TO_OS_EVENT, 
-         YEARS_TO_OS_EVENT, 
          DFS_STATUS, 
-         DAYS_TO_DFS_EVENT, 
-         YEARS_TO_DFS_EVENT)
+         DAYS_TO_DFS_EVENT)
 ```
 
 8. Only patients survived without recurrence or death for 180 days after the surgery were included.
@@ -298,6 +294,20 @@ patients_included <- data_survival |>
   select(- c(survived_6_months,
              no_recurrence_6_months))
 
+n_distinct(patients_included$PATIENT_ID)
+```
+
+Because of this last contraint, the start of the overall and disease-free survival period is adjusted by 180 days. We also removed patients without an OS or DFS event who had less than 180 days follow up.
+
+```{r}
+patients_included <- patients_included |> 
+  filter(DAYS_TO_OS_EVENT > 180,
+         DAYS_TO_DFS_EVENT > 180) |> 
+  mutate(DAYS_TO_OS_EVENT = DAYS_TO_OS_EVENT - 180,
+         DAYS_TO_DFS_EVENT = DAYS_TO_DFS_EVENT - 180,
+         YEARS_TO_OS_EVENT = DAYS_TO_OS_EVENT/365.25, 
+         YEARS_TO_DFS_EVENT = DAYS_TO_DFS_EVENT/365.25)
+  
 n_distinct(patients_included$PATIENT_ID)
 ```
 

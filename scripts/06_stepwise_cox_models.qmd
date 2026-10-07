@@ -50,7 +50,7 @@ data_dfs_noNLPgenomic <- read_tsv(file = "../data/03_data_train_dfs_noNLPgenomic
 #| label: settings
 #| echo: true
 
-max_iterations <- 100
+max_iterations <- 50
 ```
 
 # Set up cross-validation

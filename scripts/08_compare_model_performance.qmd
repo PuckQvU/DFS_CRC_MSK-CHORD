@@ -47,7 +47,7 @@ result_cols <- c("fold", "c_index",
 res_cox <- read_tsv("../results/05_cox_results.tsv",
                     col_names = result_cols)
 
-res_stepwise_cox <- read_tsv("../results/06_results_100_max.tsv",
+res_stepwise_cox <- read_tsv("../results/06_results_50_max.tsv",
                              col_names = result_cols)
 
 res_rsf <- read_tsv("../results/07_rsf_results.tsv",

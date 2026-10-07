@@ -5,6 +5,8 @@ date: today
 format: html
 ---
 
+Note: This script is mean to be run 3 times. Once for the classic Cox model, once for the LASSO regularized Cox model, and once for the elastic-net regularized Cox model. Adjust the settings accordingly and make sure the results are being written in a new document.
+
 # Set up
 
 ```{r}
@@ -50,7 +52,7 @@ data_dfs_noNLPgenomic <- read_tsv(file = "../data/03_data_train_dfs_noNLPgenomic
 #| label: settings
 #| echo: true
 
-regularization <- FALSE
+regularization <- TRUE
 alpha <- 1 # 0.5 for elastic-net, 1 for lasso, 0 for ridge
 
 p_value_threshold <- 0.05

@@ -37,7 +37,7 @@ data_dfs <- read_tsv(file = "../data/03_data_train_dfs.tsv")
 #| message: false
 #| echo: true
 
-risk_scores <- read_tsv(file = "../results/06_predictions_100_max.tsv",
+risk_scores <- read_tsv(file = "../results/06_predictions_50_max.tsv",
                         col_names = c("fold",
                                       "patient_id",
                                       "status",
@@ -47,7 +47,7 @@ risk_scores <- read_tsv(file = "../results/06_predictions_100_max.tsv",
                                       "outcome",
                                       "feature_set"))
 
-coefs <- read_tsv(file = "../results/06_coefs_100_max.tsv",
+coefs <- read_tsv(file = "../results/06_coefs_50_max.tsv",
                   col_names = c("fold",
                                 "feature",
                                 "beta",
