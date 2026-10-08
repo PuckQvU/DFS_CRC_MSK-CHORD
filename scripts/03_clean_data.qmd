@@ -470,7 +470,8 @@ cols_to_exclude <- c("surgery_date",
                      "race",
                      "ethnicity",
                      "age_last_follow_up",
-                     "stage_highest_recorded")
+                     "stage_highest_recorded",
+                     "somatic_status")
 
 numeric_cols <- c("tmb_nonsynonymous",
                   "sample_coverage",
@@ -506,6 +507,7 @@ nominal_cols <- c("msi_type",
                   "chest",
                   "abdomen",
                   "pelvis",
+                  "pleura",
                   "head",
                   "other",
                   "lymph_nodes",
@@ -741,6 +743,8 @@ lc <- findLinearCombos(mm)
 
 cols_to_remove <- unique(term_labels[assign_vec[lc$remove]])
 
+cols_to_remove
+
 data_train_os <- data_train_os |> 
   select(- all_of(cols_to_remove))
 
@@ -762,6 +766,8 @@ term_labels <- attr(terms(~ . -1,
 lc <- findLinearCombos(mm)
 
 cols_to_remove <- unique(term_labels[assign_vec[lc$remove]])
+
+cols_to_remove
 
 data_train_dfs <- data_train_dfs |> 
   select(- all_of(cols_to_remove))
@@ -851,6 +857,8 @@ In the analyses, we want to distinguish between data that is routinely collected
 
 all_colnames <- union(colnames(data_train_os),
                       colnames(data_train_os))
+
+all_colnames
 
 cna_features <- all_colnames[startsWith(all_colnames, "cna")] 
 
