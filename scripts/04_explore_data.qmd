@@ -27,38 +27,79 @@ library("survminer")
 data_train_os <- read_tsv(file = "../data/03_data_train_os.tsv")
 data_train_dfs <- read_tsv(file = "../data/03_data_train_dfs.tsv")
 data_test <- read_tsv(file = "../data/02_data_test.tsv")
+data_sample <- read_tsv(file = "../data/01_data_clinical_sample.tsv")
+data_patient <- read_tsv(file = "../data/01_data_clinical_patient.tsv")
 ```
 
-# Kaplan-Meier curves
+# Combine train and test for comparison
 
 ```{r}
-#| label: km_os
-#| message: false
-#| echo: true
+#| label: combine
 
 data_os <- data_train_os |> 
   select(patient_id,
+         sample_id,
          os_status,
-         years_to_os_event) |> 
+         years_to_os_event,
+         age_surgery) |> 
   mutate(data = "train")
 
 data_os <- data_test |> 
+  left_join(data_patient,
+            by = join_by(PATIENT_ID)) |> 
+  mutate(LAST_FOLLOW_UP_DATE = round(OS_MONTHS*30.44),
+         AGE_SURGERY = CURRENT_AGE_DEID - round((LAST_FOLLOW_UP_DATE - SURGERY_DATE)/365.25)) |> 
   select(patient_id = PATIENT_ID,
-         os_status = OS_STATUS,
-         years_to_os_event = YEARS_TO_OS_EVENT) |> 
+         sample_id = SAMPLE_ID,
+         os_status = OS_STATUS.x,
+         years_to_os_event = YEARS_TO_OS_EVENT,
+         age_surgery = AGE_SURGERY) |> 
   mutate(data = "test") |> 
   bind_rows(data_os) |> 
   mutate(data = factor(data,
                         levels = c("train",
                                    "test")))
 
-data_os |> 
-  summarise(median(years_to_os_event))
+data_dfs <- data_train_dfs |> 
+  select(patient_id,
+         sample_id,
+         dfs_status,
+         years_to_dfs_event,
+         age_surgery) |> 
+  mutate(data = "train")
+
+data_dfs <- data_test |> 
+  left_join(data_patient,
+            by = join_by(PATIENT_ID)) |> 
+  mutate(LAST_FOLLOW_UP_DATE = round(OS_MONTHS*30.44),
+         AGE_SURGERY = CURRENT_AGE_DEID - round((LAST_FOLLOW_UP_DATE - SURGERY_DATE)/365.25)) |> 
+  select(patient_id = PATIENT_ID,
+         sample_id = SAMPLE_ID,
+         dfs_status = DFS_STATUS,
+         years_to_dfs_event = YEARS_TO_DFS_EVENT,
+         age_surgery = AGE_SURGERY) |> 
+  mutate(data = "test") |> 
+  bind_rows(data_dfs) |> 
+  mutate(data = factor(data,
+                        levels = c("train",
+                                   "test")))
+```
+
+# Summarize survival time and Kaplan-Meier curves
+
+```{r}
+#| label: km_os
+#| message: false
+#| echo: true
 
 data_os |> 
   group_by(data,
            os_status) |> 
   summarise(n())
+
+data_os |> 
+  group_by(data) |> 
+  summarise(median(years_to_os_event))
 
 fit_os <- survfit(Surv(years_to_os_event, 
                        os_status) ~ data, 
@@ -90,29 +131,14 @@ ggsave("../results/04_KM_OS.png",
 #| message: false
 #| echo: true
 
-data_dfs <- data_train_dfs |> 
-  select(patient_id,
-         dfs_status,
-         years_to_dfs_event) |> 
-  mutate(data = "train")
-
-data_dfs <- data_test |> 
-  select(patient_id = PATIENT_ID,
-         dfs_status = DFS_STATUS,
-         years_to_dfs_event = YEARS_TO_DFS_EVENT) |> 
-  mutate(data = "test") |> 
-  bind_rows(data_dfs) |> 
-  mutate(data = factor(data,
-                        levels = c("train",
-                                   "test")))
-
-data_dfs |> 
-  summarise(median(years_to_dfs_event))
-
 data_dfs |> 
   group_by(data,
            dfs_status) |> 
   summarise(n())
+
+data_dfs |> 
+  group_by(data) |> 
+  summarise(median(years_to_dfs_event))
 
 fit_dfs <- survfit(Surv(years_to_dfs_event, 
                         dfs_status) ~ data, 
@@ -137,4 +163,48 @@ ggsurvplot(
 ggsave("../results/04_KM_DFS.png",
        width = 8,
        height = 4.5)
+```
+
+# Baseline characteristics
+
+Using unencoded data for easier interpretation.
+
+```{r}
+#| label: baseline_chars
+#| message: false
+
+data_os |> 
+  left_join(data_patient,
+            by = join_by(patient_id == PATIENT_ID)) |> 
+  group_by(data,
+           GENDER) |> 
+  summarise(n())
+
+data_os |> 
+  left_join(data_sample,
+            by = join_by(sample_id == SAMPLE_ID)) |> 
+  mutate(stage = as.integer(str_sub(PATHOLOGICAL_GROUP, 1, 1)),
+         stage = ifelse(stage == 0, NA, stage)) |> 
+  group_by(data,
+           stage) |> 
+  summarise(n())
+  
+data_os |> 
+  left_join(data_sample,
+            by = join_by(sample_id == SAMPLE_ID)) |> 
+  mutate(primary_site_rectum = PRIMARY_SITE == "Rectum") |> 
+  group_by(data,
+           primary_site_rectum) |> 
+  summarise(n())
+
+data_os |> 
+  group_by(data) |> 
+  summarise(mean_age = mean(age_surgery),
+            sd_age = sd(age_surgery))
+
+data_os |> 
+  mutate(advanced_age = age_surgery > 75) |> 
+  group_by(data,
+           advanced_age) |> 
+  summarise(n())
 ```
